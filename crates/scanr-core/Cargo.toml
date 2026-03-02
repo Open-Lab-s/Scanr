@@ -2,6 +2,13 @@
 name = "scanr-core"
 version = "0.1.0"
 edition = "2024"
+description = "Core scanning and reporting engine for Scanr"
+license = "Apache-2.0"
+repository = "https://github.com/scanr-dev/scanr"
+homepage = "https://scanr.dev"
+readme = "../../README.md"
+keywords = ["security", "devsecops", "sbom", "vulnerability", "scanner"]
+categories = ["development-tools"]
 
 [dependencies]
 futures = "0.3"

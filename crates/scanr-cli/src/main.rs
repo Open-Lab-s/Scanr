@@ -113,224 +113,184 @@ async fn main() {
             raw_json_out,
             recursive: _,
         }) => {
-            if json || sarif {
-                match scanr_core::scan_path(&path).await {
-                    Ok(scan_result) => {
-                        if json {
-                            let payload =
-                                serde_json::to_string_pretty(&scan_result).map_err(|error| {
-                                    format!("failed to serialize scan result: {error}")
-                                });
-                            match payload {
-                                Ok(payload) => println!("{payload}"),
-                                Err(error) => {
-                                    eprintln!("{error}");
-                                    process::exit(1);
-                                }
-                            }
-                        } else {
-                            let sarif_report = scanr_core::scan_result_to_sarif(&scan_result);
-                            let payload =
-                                serde_json::to_string_pretty(&sarif_report).map_err(|error| {
-                                    format!("failed to serialize SARIF report: {error}")
-                                });
-                            match payload {
-                                Ok(payload) => println!("{payload}"),
-                                Err(error) => {
-                                    eprintln!("{error}");
-                                    process::exit(1);
-                                }
-                            }
-                        }
-                    }
+            let scan_result = match scanr_core::scan_path(&path).await {
+                Ok(scan_result) => scan_result,
+                Err(error) => {
+                    eprintln!("Scan failed: {error}");
+                    process::exit(1);
+                }
+            };
+
+            if json {
+                match serde_json::to_string_pretty(&scan_result) {
+                    Ok(payload) => println!("{payload}"),
                     Err(error) => {
-                        eprintln!("Scan failed: {error}");
+                        eprintln!("failed to serialize scan result: {error}");
                         process::exit(1);
                     }
                 }
                 return;
             }
 
-            match scanr_core::scan_dependencies(&path) {
-                Ok(dependencies) => {
-                    if dependencies.is_empty() {
-                        println!("No dependencies found in '{}'.", path.display());
-                        return;
-                    }
-
-                    let target_name = resolve_target_name(&path);
-                    let target_path = resolve_target_path(&path);
-
-                    println!("Scanr Security Scan");
-                    println!("Target: {target_name}");
-                    println!("Path: {target_path}");
-                    println!("Dependencies analyzed: {}", dependencies.len());
-
-                    if list_deps {
-                        println!();
-                        println!("Dependencies:");
-                        for dependency in &dependencies {
-                            let kind = if dependency.direct {
-                                "direct"
-                            } else {
-                                "transitive"
-                            };
-                            println!(
-                                "- [{}] {} {} ({})",
-                                dependency.ecosystem, dependency.name, dependency.version, kind
-                            );
-                        }
-                    }
-
-                    let (vulnerability_report, lookup_error) =
-                        match scanr_core::investigate_vulnerabilities(&dependencies).await {
-                            Ok(report) => (report, None),
-                            Err(error) => (
-                                scanr_core::VulnerabilityReport {
-                                    vulnerabilities: Vec::new(),
-                                    upgrade_recommendations: Vec::new(),
-                                    queried_dependencies: 0,
-                                    failed_queries: 0,
-                                },
-                                Some(error.to_string()),
-                            ),
-                        };
-
-                    if vulnerability_report.vulnerabilities.is_empty() {
-                        println!();
-                        println!("No known vulnerabilities found in OSV responses.");
-                    } else {
-                        println!();
-                        println!(
-                            "Vulnerabilities found: {}",
-                            vulnerability_report.vulnerabilities.len()
-                        );
-                        print_vulnerability_table(&vulnerability_report.vulnerabilities);
-                        println!();
-                        println!(
-                            "Use --raw-json or --raw-json-out <file> for full advisory details/references."
-                        );
-                    }
-
-                    if !vulnerability_report.upgrade_recommendations.is_empty() {
-                        println!();
-                        println!(
-                            "Upgrade recommendations: {}",
-                            vulnerability_report.upgrade_recommendations.len()
-                        );
-                        print_upgrade_recommendations_table(
-                            &vulnerability_report.upgrade_recommendations,
-                        );
-                    }
-
-                    let risk_summary =
-                        scanr_core::summarize_risk(&vulnerability_report.vulnerabilities);
-                    print_risk_summary(&risk_summary);
-
-                    if vulnerability_report.failed_queries > 0 {
-                        println!();
-                        eprintln!(
-                            "Warning: OSV lookup failed for {}/{} dependencies. Results may be incomplete.",
-                            vulnerability_report.failed_queries,
-                            vulnerability_report.queried_dependencies
-                        );
-                    }
-
-                    if let Some(error) = &lookup_error {
-                        println!();
-                        eprintln!(
-                            "Warning: vulnerability lookup unavailable ({error}). Dependencies were scanned successfully."
-                        );
-                    }
-
-                    let mut ci_exit_code = 0i32;
-                    let mut policy_path_display = None;
-                    let mut policy = None;
-                    let mut policy_evaluation = None;
-
-                    if ci {
-                        println!();
-                        println!("CI Policy Check");
-                        match scanr_core::load_policy_for_target(&path) {
-                            Ok((loaded_policy, loaded_policy_path)) => {
-                                if let Some(policy_path) = loaded_policy_path {
-                                    let normalized = normalize_windows_verbatim_path(
-                                        policy_path.display().to_string(),
-                                    );
-                                    println!("Policy file: {normalized}");
-                                    policy_path_display = Some(normalized);
-                                } else {
-                                    println!(
-                                        "Policy file: not found (using defaults max_critical=0, max_high=0)"
-                                    );
-                                }
-                                println!(
-                                    "Rules: max_critical={} | max_high={}",
-                                    loaded_policy.max_critical, loaded_policy.max_high
-                                );
-
-                                let evaluation =
-                                    scanr_core::evaluate_policy(&risk_summary, &loaded_policy);
-                                if evaluation.passed {
-                                    println!("Result: PASS");
-                                } else {
-                                    println!("Result: FAIL");
-                                    println!("Violations:");
-                                    for violation in &evaluation.violations {
-                                        println!("- {violation}");
-                                    }
-                                    ci_exit_code = 2;
-                                }
-
-                                if lookup_error.is_some() || vulnerability_report.failed_queries > 0
-                                {
-                                    println!("Result: FAIL");
-                                    println!(
-                                        "- vulnerability lookup incomplete; CI mode requires complete OSV results"
-                                    );
-                                    ci_exit_code = 3;
-                                }
-
-                                policy = Some(loaded_policy);
-                                policy_evaluation = Some(evaluation);
-                            }
-                            Err(error) => {
-                                eprintln!("Failed to load policy: {error}");
-                                process::exit(2);
-                            }
-                        }
-                    }
-
-                    let payload = ScanRawOutput {
-                        target: target_name,
-                        path: target_path,
-                        ci_mode: ci,
-                        dependencies_analyzed: dependencies.len(),
-                        queried_dependencies: vulnerability_report.queried_dependencies,
-                        failed_queries: vulnerability_report.failed_queries,
-                        lookup_error: lookup_error.clone(),
-                        risk_summary,
-                        policy_path: policy_path_display,
-                        policy,
-                        policy_evaluation,
-                        dependencies,
-                        vulnerabilities: vulnerability_report.vulnerabilities,
-                        upgrade_recommendations: vulnerability_report.upgrade_recommendations,
-                    };
-
-                    if let Err(error) = emit_raw_output(&payload, raw_json, &raw_json_out) {
-                        eprintln!("Failed to emit raw JSON: {error}");
+            if sarif {
+                let sarif_report = scanr_core::scan_result_to_sarif(&scan_result);
+                match serde_json::to_string_pretty(&sarif_report) {
+                    Ok(payload) => println!("{payload}"),
+                    Err(error) => {
+                        eprintln!("failed to serialize SARIF report: {error}");
                         process::exit(1);
                     }
+                }
+                return;
+            }
 
-                    if ci_exit_code != 0 {
-                        process::exit(ci_exit_code);
+            if scan_result.dependencies.is_empty() {
+                println!("No dependencies found in '{}'.", path.display());
+            } else {
+                println!("Scanr Security Scan");
+                println!("Target: {}", scan_result.target);
+                println!("Path: {}", scan_result.path);
+                println!("Dependencies analyzed: {}", scan_result.total_dependencies);
+
+                if list_deps {
+                    println!();
+                    println!("Dependencies:");
+                    for dependency in &scan_result.dependencies {
+                        let kind = if dependency.direct {
+                            "direct"
+                        } else {
+                            "transitive"
+                        };
+                        println!(
+                            "- [{}] {} {} ({})",
+                            dependency.ecosystem, dependency.name, dependency.version, kind
+                        );
                     }
                 }
-                Err(error) => {
-                    eprintln!("Scan failed: {error}");
-                    process::exit(1);
+
+                if scan_result.vulnerabilities.is_empty() {
+                    println!();
+                    println!("No known vulnerabilities found in OSV responses.");
+                } else {
+                    println!();
+                    println!(
+                        "Vulnerabilities found: {}",
+                        scan_result.vulnerabilities.len()
+                    );
+                    print_vulnerability_table(&scan_result.vulnerabilities);
+                    println!();
+                    println!(
+                        "Use --raw-json or --raw-json-out <file> for full advisory details/references."
+                    );
                 }
+
+                if !scan_result.upgrade_recommendations.is_empty() {
+                    println!();
+                    println!(
+                        "Upgrade recommendations: {}",
+                        scan_result.upgrade_recommendations.len()
+                    );
+                    print_upgrade_recommendations_table(&scan_result.upgrade_recommendations);
+                }
+
+                print_risk_summary(&scan_result);
+
+                if scan_result.failed_queries > 0 {
+                    println!();
+                    eprintln!(
+                        "Warning: OSV lookup failed for {}/{} dependencies. Results may be incomplete.",
+                        scan_result.failed_queries, scan_result.queried_dependencies
+                    );
+                }
+
+                if let Some(error) = &scan_result.lookup_error {
+                    println!();
+                    eprintln!(
+                        "Warning: vulnerability lookup unavailable ({error}). Dependencies were scanned successfully."
+                    );
+                }
+            }
+
+            let mut ci_exit_code = 0i32;
+            let mut policy_path_display = None;
+            let mut policy = None;
+            let mut policy_evaluation = None;
+
+            if ci {
+                println!();
+                println!("CI Policy Check");
+                match scanr_core::load_policy_for_target(&path) {
+                    Ok((loaded_policy, loaded_policy_path)) => {
+                        if let Some(policy_path) = loaded_policy_path {
+                            let normalized =
+                                normalize_windows_verbatim_path(policy_path.display().to_string());
+                            println!("Policy file: {normalized}");
+                            policy_path_display = Some(normalized);
+                        } else {
+                            println!(
+                                "Policy file: not found (using defaults max_critical=0, max_high=0)"
+                            );
+                        }
+                        println!(
+                            "Rules: max_critical={} | max_high={}",
+                            loaded_policy.max_critical, loaded_policy.max_high
+                        );
+
+                        let risk_summary = risk_summary_from_scan_result(&scan_result);
+                        let evaluation = scanr_core::evaluate_policy(&risk_summary, &loaded_policy);
+                        if evaluation.passed {
+                            println!("Result: PASS");
+                        } else {
+                            println!("Result: FAIL");
+                            println!("Violations:");
+                            for violation in &evaluation.violations {
+                                println!("- {violation}");
+                            }
+                            ci_exit_code = 2;
+                        }
+
+                        if scan_result.lookup_error.is_some() || scan_result.failed_queries > 0 {
+                            println!("Result: FAIL");
+                            println!(
+                                "- vulnerability lookup incomplete; CI mode requires complete OSV results"
+                            );
+                            ci_exit_code = 3;
+                        }
+
+                        policy = Some(loaded_policy);
+                        policy_evaluation = Some(evaluation);
+                    }
+                    Err(error) => {
+                        eprintln!("Failed to load policy: {error}");
+                        process::exit(2);
+                    }
+                }
+            }
+
+            let payload = ScanRawOutput {
+                target: scan_result.target.clone(),
+                path: scan_result.path.clone(),
+                ci_mode: ci,
+                dependencies_analyzed: scan_result.total_dependencies as usize,
+                queried_dependencies: scan_result.queried_dependencies as usize,
+                failed_queries: scan_result.failed_queries as usize,
+                lookup_error: scan_result.lookup_error.clone(),
+                risk_summary: risk_summary_from_scan_result(&scan_result),
+                policy_path: policy_path_display,
+                policy,
+                policy_evaluation,
+                dependencies: scan_result.dependencies.clone(),
+                vulnerabilities: scan_result.vulnerabilities.clone(),
+                upgrade_recommendations: scan_result.upgrade_recommendations.clone(),
+            };
+
+            if let Err(error) = emit_raw_output(&payload, raw_json, &raw_json_out) {
+                eprintln!("Failed to emit raw JSON: {error}");
+                process::exit(1);
+            }
+
+            if ci_exit_code != 0 {
+                process::exit(ci_exit_code);
             }
         }
         Some(Commands::Sbom { command }) => match command {
@@ -432,22 +392,6 @@ async fn main() {
     }
 }
 
-fn resolve_target_name(path: &PathBuf) -> String {
-    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
-    resolved
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(ToString::to_string)
-        .unwrap_or_else(|| resolved.display().to_string())
-}
-
-fn resolve_target_path(path: &PathBuf) -> String {
-    let raw = std::fs::canonicalize(path)
-        .map(|resolved| resolved.display().to_string())
-        .unwrap_or_else(|_| path.display().to_string());
-    normalize_windows_verbatim_path(raw)
-}
-
 fn normalize_windows_verbatim_path(path: String) -> String {
     if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
         return format!(r"\\{rest}");
@@ -484,18 +428,18 @@ fn print_vulnerability_table(vulnerabilities: &[scanr_core::Vulnerability]) {
     }
 }
 
-fn print_risk_summary(summary: &scanr_core::RiskSummary) {
+fn print_risk_summary(scan_result: &scanr_core::ScanResult) {
     println!();
     println!("Risk Summary");
     println!(
         "critical: {} | high: {} | medium: {} | low: {} | unknown: {}",
-        summary.counts.critical,
-        summary.counts.high,
-        summary.counts.medium,
-        summary.counts.low,
-        summary.counts.unknown
+        scan_result.severity_summary.critical,
+        scan_result.severity_summary.high,
+        scan_result.severity_summary.medium,
+        scan_result.severity_summary.low,
+        scan_result.severity_summary.unknown
     );
-    println!("risk level: {}", summary.risk_level);
+    println!("risk level: {}", scan_result.risk_level);
 }
 
 fn print_upgrade_recommendations_table(recommendations: &[scanr_core::UpgradeRecommendation]) {
@@ -659,4 +603,18 @@ fn emit_raw_output(
     }
 
     Ok(())
+}
+
+fn risk_summary_from_scan_result(scan_result: &scanr_core::ScanResult) -> scanr_core::RiskSummary {
+    scanr_core::RiskSummary {
+        total: scan_result.vulnerabilities.len(),
+        counts: scanr_core::SeverityCounts {
+            critical: scan_result.severity_summary.critical as usize,
+            high: scan_result.severity_summary.high as usize,
+            medium: scan_result.severity_summary.medium as usize,
+            low: scan_result.severity_summary.low as usize,
+            unknown: scan_result.severity_summary.unknown as usize,
+        },
+        risk_level: scan_result.risk_level,
+    }
 }

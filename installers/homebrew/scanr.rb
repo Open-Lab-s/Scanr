@@ -6,24 +6,29 @@ class Scanr < Formula
 
   on_macos do
     if Hardware::CPU.arm?
-      url "https://github.com/scanr-dev/scanr/releases/download/v#{version}/scanr-aarch64-apple-darwin.tar.gz"
+      url "https://github.com/scanr-dev/scanr/releases/download/v#{version}/scanr-aarch64-apple-darwin"
       sha256 "REPLACE_WITH_SHA256"
     else
-      url "https://github.com/scanr-dev/scanr/releases/download/v#{version}/scanr-x86_64-apple-darwin.tar.gz"
+      url "https://github.com/scanr-dev/scanr/releases/download/v#{version}/scanr-x86_64-apple-darwin"
       sha256 "REPLACE_WITH_SHA256"
     end
   end
 
   on_linux do
-    url "https://github.com/scanr-dev/scanr/releases/download/v#{version}/scanr-x86_64-unknown-linux-gnu.tar.gz"
-    sha256 "REPLACE_WITH_SHA256"
+    if Hardware::CPU.arm?
+      url "https://github.com/scanr-dev/scanr/releases/download/v#{version}/scanr-aarch64-unknown-linux-gnu"
+      sha256 "REPLACE_WITH_SHA256"
+    else
+      url "https://github.com/scanr-dev/scanr/releases/download/v#{version}/scanr-x86_64-unknown-linux-gnu"
+      sha256 "REPLACE_WITH_SHA256"
+    end
   end
 
   def install
-    bin.install "scanr"
+    bin.install Dir["scanr*"].first => "scanr"
   end
 
   test do
-    assert_match "scanr", shell_output("#{bin}/scanr --version")
+    assert_match "scanr", shell_output("#{bin}/scanr --version").downcase
   end
 end

@@ -1,15 +1,34 @@
 {
-  "name": "@scanr/cli",
+  "name": "scanr",
   "version": "0.1.0",
-  "description": "Scanr CLI distribution package.",
+  "description": "Scanr CLI distribution package",
+  "homepage": "https://github.com/scanr-dev/scanr",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/scanr-dev/scanr.git"
+  },
   "license": "Apache-2.0",
+  "preferGlobal": true,
+  "type": "commonjs",
   "bin": {
     "scanr": "./bin/scanr.js"
   },
+  "scripts": {
+    "postinstall": "node ./scripts/install.js"
+  },
   "files": [
-    "bin"
+    "bin",
+    "scripts",
+    "vendor"
   ],
   "engines": {
     "node": ">=18"
-  }
+  },
+  "keywords": [
+    "scanr",
+    "security",
+    "devsecops",
+    "sbom",
+    "vulnerability"
+  ]
 }
