@@ -313,12 +313,63 @@ async fn main() {
                 }
             }
             SbomCommands::Diff { old, new } => {
-                println!(
-                    "Placeholder: diffing SBOM '{}' -> '{}' ({})",
-                    old.display(),
-                    new.display(),
-                    scanr_core::placeholder_status()
-                );
+                match scanr_core::diff_cyclonedx_sbom_files(&old, &new) {
+                    Ok(diff) => {
+                        println!("SBOM Diff");
+                        println!("Old: {}", old.display());
+                        println!("New: {}", new.display());
+                        println!(
+                            "Components: {} -> {}",
+                            diff.old_components, diff.new_components
+                        );
+
+                        println!();
+                        print_dependency_delta_section("Added", &diff.added_dependencies, 100);
+                        print_dependency_delta_section("Removed", &diff.removed_dependencies, 100);
+                        print_version_change_section(&diff.version_changes, 100);
+
+                        println!();
+                        println!(
+                            "Introduced package versions: {}",
+                            diff.introduced_dependencies.len()
+                        );
+
+                        if diff.introduced_dependencies.is_empty() {
+                            println!("New Vulnerabilities: 0");
+                        } else {
+                            match scanr_core::investigate_vulnerabilities(
+                                &diff.introduced_dependencies,
+                            )
+                            .await
+                            {
+                                Ok(report) => {
+                                    let summary =
+                                        scanr_core::summarize_risk(&report.vulnerabilities);
+                                    println!(
+                                        "New Vulnerabilities: {} {}",
+                                        summary.total,
+                                        summarize_severity_for_delta(&summary.counts)
+                                    );
+                                    if report.failed_queries > 0 {
+                                        eprintln!(
+                                            "Warning: vulnerability lookup failed for {}/{} introduced dependencies.",
+                                            report.failed_queries, report.queried_dependencies
+                                        );
+                                    }
+                                }
+                                Err(error) => {
+                                    eprintln!(
+                                        "Warning: vulnerability lookup unavailable for introduced dependencies ({error})."
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("SBOM diff failed: {error}");
+                        process::exit(1);
+                    }
+                }
             }
         },
     }
@@ -415,6 +466,54 @@ fn print_upgrade_recommendations_table(recommendations: &[scanr_core::UpgradeRec
             status,
         );
     }
+}
+
+fn print_dependency_delta_section(
+    label: &str,
+    dependencies: &[scanr_core::Dependency],
+    max_rows: usize,
+) {
+    println!("{label}: {}", dependencies.len());
+    for dependency in dependencies.iter().take(max_rows) {
+        println!(
+            "- {}@{} [{}]",
+            dependency.name, dependency.version, dependency.ecosystem
+        );
+    }
+    if dependencies.len() > max_rows {
+        println!("- ... and {} more", dependencies.len() - max_rows);
+    }
+}
+
+fn print_version_change_section(changes: &[scanr_core::SbomVersionChange], max_rows: usize) {
+    println!("Version changes: {}", changes.len());
+    for change in changes.iter().take(max_rows) {
+        let old_versions = change.old_versions.join(", ");
+        let new_versions = change.new_versions.join(", ");
+        println!(
+            "- {} [{}]: {} -> {}",
+            change.name, change.ecosystem, old_versions, new_versions
+        );
+    }
+    if changes.len() > max_rows {
+        println!("- ... and {} more", changes.len() - max_rows);
+    }
+}
+
+fn summarize_severity_for_delta(counts: &scanr_core::SeverityCounts) -> String {
+    if counts.critical > 0 {
+        return "CRITICAL".to_string();
+    }
+    if counts.high > 0 {
+        return "HIGH".to_string();
+    }
+    if counts.medium > 0 {
+        return "MODERATE".to_string();
+    }
+    if counts.low > 0 {
+        return "LOW".to_string();
+    }
+    "NONE".to_string()
 }
 
 fn package_name_from_description(description: &str) -> String {

@@ -171,6 +171,24 @@ pub struct SbomDocument {
     pub json: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SbomVersionChange {
+    pub ecosystem: Ecosystem,
+    pub name: String,
+    pub old_versions: Vec<String>,
+    pub new_versions: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SbomDiffReport {
+    pub old_components: usize,
+    pub new_components: usize,
+    pub added_dependencies: Vec<Dependency>,
+    pub removed_dependencies: Vec<Dependency>,
+    pub version_changes: Vec<SbomVersionChange>,
+    pub introduced_dependencies: Vec<Dependency>,
+}
+
 #[derive(Debug, Serialize)]
 struct CycloneDxBom {
     #[serde(rename = "bomFormat")]
@@ -212,6 +230,23 @@ struct CycloneDxDependencyEntry {
     ref_id: String,
     #[serde(rename = "dependsOn", skip_serializing_if = "Vec::is_empty")]
     depends_on: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+struct CycloneDxBomInput {
+    components: Vec<CycloneDxComponentInput>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+struct CycloneDxComponentInput {
+    #[serde(rename = "type")]
+    _component_type: String,
+    name: String,
+    version: Option<String>,
+    scope: Option<String>,
+    purl: Option<String>,
 }
 
 #[derive(Debug)]
@@ -456,6 +491,229 @@ pub fn generate_cyclonedx_sbom(path: &Path) -> Result<SbomDocument, ScanError> {
         component_count: dependencies.len(),
         json,
     })
+}
+
+pub fn diff_cyclonedx_sbom_files(
+    old_path: &Path,
+    new_path: &Path,
+) -> Result<SbomDiffReport, ScanError> {
+    let old_dependencies = load_sbom_dependencies(old_path)?;
+    let new_dependencies = load_sbom_dependencies(new_path)?;
+
+    type FullKey = (Ecosystem, String, String);
+    type PackageKey = (Ecosystem, String);
+
+    let mut old_direct_map: HashMap<FullKey, bool> = HashMap::new();
+    let mut new_direct_map: HashMap<FullKey, bool> = HashMap::new();
+    for dependency in &old_dependencies {
+        let key = (
+            dependency.ecosystem,
+            dependency.name.clone(),
+            dependency.version.clone(),
+        );
+        old_direct_map
+            .entry(key)
+            .and_modify(|direct| *direct = *direct || dependency.direct)
+            .or_insert(dependency.direct);
+    }
+    for dependency in &new_dependencies {
+        let key = (
+            dependency.ecosystem,
+            dependency.name.clone(),
+            dependency.version.clone(),
+        );
+        new_direct_map
+            .entry(key)
+            .and_modify(|direct| *direct = *direct || dependency.direct)
+            .or_insert(dependency.direct);
+    }
+
+    let mut old_versions: HashMap<PackageKey, BTreeSet<String>> = HashMap::new();
+    let mut new_versions: HashMap<PackageKey, BTreeSet<String>> = HashMap::new();
+    for dependency in &old_dependencies {
+        old_versions
+            .entry((dependency.ecosystem, dependency.name.clone()))
+            .or_default()
+            .insert(dependency.version.clone());
+    }
+    for dependency in &new_dependencies {
+        new_versions
+            .entry((dependency.ecosystem, dependency.name.clone()))
+            .or_default()
+            .insert(dependency.version.clone());
+    }
+
+    let old_packages = old_versions.keys().cloned().collect::<HashSet<_>>();
+    let new_packages = new_versions.keys().cloned().collect::<HashSet<_>>();
+    let added_packages = new_packages
+        .difference(&old_packages)
+        .cloned()
+        .collect::<HashSet<_>>();
+    let removed_packages = old_packages
+        .difference(&new_packages)
+        .cloned()
+        .collect::<HashSet<_>>();
+
+    let mut added = new_direct_map
+        .iter()
+        .filter_map(|((ecosystem, name, version), direct)| {
+            if !added_packages.contains(&(*ecosystem, name.clone())) {
+                return None;
+            }
+            Some(Dependency {
+                ecosystem: *ecosystem,
+                name: name.clone(),
+                version: version.clone(),
+                direct: *direct,
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut removed = old_direct_map
+        .iter()
+        .filter_map(|((ecosystem, name, version), direct)| {
+            if !removed_packages.contains(&(*ecosystem, name.clone())) {
+                return None;
+            }
+            Some(Dependency {
+                ecosystem: *ecosystem,
+                name: name.clone(),
+                version: version.clone(),
+                direct: *direct,
+            })
+        })
+        .collect::<Vec<_>>();
+    added.sort_by(|a, b| {
+        (a.ecosystem, a.name.as_str(), a.version.as_str()).cmp(&(
+            b.ecosystem,
+            b.name.as_str(),
+            b.version.as_str(),
+        ))
+    });
+    removed.sort_by(|a, b| {
+        (a.ecosystem, a.name.as_str(), a.version.as_str()).cmp(&(
+            b.ecosystem,
+            b.name.as_str(),
+            b.version.as_str(),
+        ))
+    });
+
+    let mut version_changes = Vec::new();
+    for (package_key, old_set_versions) in &old_versions {
+        let Some(new_set_versions) = new_versions.get(package_key) else {
+            continue;
+        };
+        if old_set_versions != new_set_versions {
+            version_changes.push(SbomVersionChange {
+                ecosystem: package_key.0,
+                name: package_key.1.clone(),
+                old_versions: old_set_versions.iter().cloned().collect(),
+                new_versions: new_set_versions.iter().cloned().collect(),
+            });
+        }
+    }
+    version_changes
+        .sort_by(|a, b| (a.ecosystem, a.name.as_str()).cmp(&(b.ecosystem, b.name.as_str())));
+
+    let mut introduced_map: HashMap<FullKey, bool> = HashMap::new();
+    for dependency in &added {
+        let key = (
+            dependency.ecosystem,
+            dependency.name.clone(),
+            dependency.version.clone(),
+        );
+        introduced_map
+            .entry(key)
+            .and_modify(|direct| *direct = *direct || dependency.direct)
+            .or_insert(dependency.direct);
+    }
+    for change in &version_changes {
+        let old_set_versions = old_versions
+            .get(&(change.ecosystem, change.name.clone()))
+            .cloned()
+            .unwrap_or_default();
+        for new_version in &change.new_versions {
+            if old_set_versions.contains(new_version) {
+                continue;
+            }
+            let direct = new_direct_map
+                .get(&(change.ecosystem, change.name.clone(), new_version.clone()))
+                .copied()
+                .unwrap_or(false);
+            introduced_map
+                .entry((change.ecosystem, change.name.clone(), new_version.clone()))
+                .and_modify(|flag| *flag = *flag || direct)
+                .or_insert(direct);
+        }
+    }
+    let mut introduced_dependencies = introduced_map
+        .into_iter()
+        .map(|((ecosystem, name, version), direct)| Dependency {
+            ecosystem,
+            name,
+            version,
+            direct,
+        })
+        .collect::<Vec<_>>();
+    introduced_dependencies.sort_by(|a, b| {
+        (a.ecosystem, a.name.as_str(), a.version.as_str()).cmp(&(
+            b.ecosystem,
+            b.name.as_str(),
+            b.version.as_str(),
+        ))
+    });
+
+    Ok(SbomDiffReport {
+        old_components: old_direct_map.len(),
+        new_components: new_direct_map.len(),
+        added_dependencies: added,
+        removed_dependencies: removed,
+        version_changes,
+        introduced_dependencies,
+    })
+}
+
+fn load_sbom_dependencies(path: &Path) -> Result<Vec<Dependency>, ScanError> {
+    let contents = fs::read_to_string(path).map_err(|source| ScanError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let parsed: CycloneDxBomInput =
+        serde_json::from_str(&contents).map_err(|source| ScanError::Json {
+            path: path.to_path_buf(),
+            source,
+        })?;
+
+    let mut dependencies = Vec::new();
+    for component in parsed.components {
+        let Some(mut dependency) = dependency_from_component(&component) else {
+            continue;
+        };
+        if dependency.version.trim().is_empty() {
+            continue;
+        }
+        dependency.direct = component
+            .scope
+            .as_deref()
+            .is_some_and(|scope| scope.eq_ignore_ascii_case("required"));
+        dependencies.push(dependency);
+    }
+
+    Ok(dedupe_and_sort(dependencies))
+}
+
+fn dependency_from_component(component: &CycloneDxComponentInput) -> Option<Dependency> {
+    if let Some(purl) = component.purl.as_deref()
+        && let Some((ecosystem, name, version)) = parse_purl_dependency(purl)
+    {
+        return Some(Dependency {
+            name,
+            version: version.unwrap_or_else(|| component.version.clone().unwrap_or_default()),
+            ecosystem,
+            direct: false,
+        });
+    }
+
+    None
 }
 
 fn normalize_windows_verbatim_path(path: String) -> String {
@@ -1174,6 +1432,75 @@ fn encode_purl_name(raw: &str) -> String {
 
 fn encode_purl_segment(raw: &str) -> String {
     raw.replace(' ', "%20")
+}
+
+fn parse_purl_dependency(purl: &str) -> Option<(Ecosystem, String, Option<String>)> {
+    let raw = purl.strip_prefix("pkg:")?;
+    let (package_type, remainder) = raw.split_once('/')?;
+    let ecosystem = match package_type.to_ascii_lowercase().as_str() {
+        "npm" => Ecosystem::Node,
+        "pypi" => Ecosystem::Python,
+        "cargo" | "crates.io" => Ecosystem::Rust,
+        _ => return None,
+    };
+
+    let remainder = remainder
+        .split_once('?')
+        .map(|(head, _)| head)
+        .unwrap_or(remainder);
+    let remainder = remainder
+        .split_once('#')
+        .map(|(head, _)| head)
+        .unwrap_or(remainder);
+    let (name_part, version_part) = remainder
+        .split_once('@')
+        .map_or((remainder, None), |(name, version)| (name, Some(version)));
+
+    let decoded_name = decode_purl_segment(name_part);
+    if decoded_name.trim().is_empty() {
+        return None;
+    }
+
+    let decoded_version = version_part
+        .map(decode_purl_segment)
+        .filter(|version| !version.trim().is_empty());
+    Some((ecosystem, decoded_name, decoded_version))
+}
+
+fn decode_purl_segment(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0usize;
+
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let Some(value) = decode_hex_pair(bytes[index + 1], bytes[index + 2])
+        {
+            output.push(value);
+            index += 3;
+            continue;
+        }
+        output.push(bytes[index]);
+        index += 1;
+    }
+
+    String::from_utf8(output).unwrap_or_else(|_| raw.to_string())
+}
+
+fn decode_hex_pair(high: u8, low: u8) -> Option<u8> {
+    fn decode_nibble(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        }
+    }
+
+    let high = decode_nibble(high)?;
+    let low = decode_nibble(low)?;
+    Some((high << 4) | low)
 }
 
 fn sanitize_ref(raw: &str) -> String {
@@ -1915,6 +2242,75 @@ mod tests {
             json.get("dependencies")
                 .and_then(serde_json::Value::as_array)
                 .is_some_and(|dependencies| !dependencies.is_empty())
+        );
+    }
+
+    #[test]
+    fn sbom_diff_detects_added_removed_and_version_changes() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("valid time")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("scanr-sbom-diff-{unique}"));
+        std::fs::create_dir_all(&root).expect("create temp root");
+
+        let old_sbom = root.join("old.cdx.json");
+        let new_sbom = root.join("new.cdx.json");
+
+        std::fs::write(
+            &old_sbom,
+            r#"{
+  "bomFormat":"CycloneDX",
+  "specVersion":"1.5",
+  "version":1,
+  "components":[
+    {"type":"library","name":"lodash","version":"4.17.20","purl":"pkg:npm/lodash@4.17.20","scope":"required"},
+    {"type":"library","name":"requests","version":"2.31.0","purl":"pkg:pypi/requests@2.31.0","scope":"required"}
+  ]
+}"#,
+        )
+        .expect("write old sbom");
+
+        std::fs::write(
+            &new_sbom,
+            r#"{
+  "bomFormat":"CycloneDX",
+  "specVersion":"1.5",
+  "version":1,
+  "components":[
+    {"type":"library","name":"lodash","version":"4.17.21","purl":"pkg:npm/lodash@4.17.21","scope":"required"},
+    {"type":"library","name":"axios","version":"1.2.0","purl":"pkg:npm/axios@1.2.0","scope":"required"}
+  ]
+}"#,
+        )
+        .expect("write new sbom");
+
+        let diff = diff_cyclonedx_sbom_files(&old_sbom, &new_sbom).expect("diff should parse");
+
+        assert!(
+            diff.added_dependencies
+                .iter()
+                .any(|dependency| dependency.name == "axios" && dependency.version == "1.2.0")
+        );
+        assert!(
+            diff.removed_dependencies
+                .iter()
+                .any(|dependency| dependency.name == "requests" && dependency.version == "2.31.0")
+        );
+        assert!(diff.version_changes.iter().any(|change| {
+            change.name == "lodash"
+                && change.old_versions == vec!["4.17.20".to_string()]
+                && change.new_versions == vec!["4.17.21".to_string()]
+        }));
+        assert!(
+            diff.introduced_dependencies
+                .iter()
+                .any(|dependency| dependency.name == "lodash" && dependency.version == "4.17.21")
+        );
+        assert!(
+            diff.introduced_dependencies
+                .iter()
+                .any(|dependency| dependency.name == "axios" && dependency.version == "1.2.0")
         );
     }
 }
