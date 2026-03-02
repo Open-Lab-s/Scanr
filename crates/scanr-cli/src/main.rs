@@ -44,7 +44,19 @@ enum Commands {
 #[derive(Debug, Subcommand)]
 enum SbomCommands {
     /// Generate an SBOM.
-    Generate,
+    Generate {
+        /// Path to generate SBOM from.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Output CycloneDX JSON file.
+        #[arg(
+            short,
+            long,
+            value_name = "FILE",
+            default_value = "scanr.sbom.cdx.json"
+        )]
+        output: PathBuf,
+    },
     /// Diff two SBOM documents.
     Diff {
         /// Path to the old SBOM.
@@ -265,11 +277,40 @@ async fn main() {
             }
         },
         Commands::Sbom { command } => match command {
-            SbomCommands::Generate => {
-                println!(
-                    "Placeholder: generating SBOM ({})",
-                    scanr_core::placeholder_status()
-                );
+            SbomCommands::Generate { path, output } => {
+                match scanr_core::generate_cyclonedx_sbom(&path) {
+                    Ok(sbom) => {
+                        if let Some(parent) = output.parent()
+                            && !parent.as_os_str().is_empty()
+                        {
+                            if let Err(error) = fs::create_dir_all(parent) {
+                                eprintln!(
+                                    "SBOM generation failed: could not create output directory '{}': {error}",
+                                    parent.display()
+                                );
+                                process::exit(1);
+                            }
+                        }
+
+                        if let Err(error) = fs::write(&output, &sbom.json) {
+                            eprintln!(
+                                "SBOM generation failed: could not write '{}': {error}",
+                                output.display()
+                            );
+                            process::exit(1);
+                        }
+
+                        println!("CycloneDX SBOM generated");
+                        println!("Target: {}", sbom.target);
+                        println!("Path: {}", sbom.path);
+                        println!("Components: {}", sbom.component_count);
+                        println!("Output: {}", output.display());
+                    }
+                    Err(error) => {
+                        eprintln!("SBOM generation failed: {error}");
+                        process::exit(1);
+                    }
+                }
             }
             SbomCommands::Diff { old, new } => {
                 println!(

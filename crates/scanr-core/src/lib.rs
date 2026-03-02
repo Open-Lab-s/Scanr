@@ -1,7 +1,8 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, hash_map::DefaultHasher};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -162,6 +163,57 @@ pub struct UpgradeRecommendation {
     pub major_bump: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SbomDocument {
+    pub target: String,
+    pub path: String,
+    pub component_count: usize,
+    pub json: String,
+}
+
+#[derive(Debug, Serialize)]
+struct CycloneDxBom {
+    #[serde(rename = "bomFormat")]
+    bom_format: &'static str,
+    #[serde(rename = "specVersion")]
+    spec_version: &'static str,
+    #[serde(rename = "serialNumber")]
+    serial_number: String,
+    version: u32,
+    metadata: CycloneDxMetadata,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    components: Vec<CycloneDxComponent>,
+    dependencies: Vec<CycloneDxDependencyEntry>,
+}
+
+#[derive(Debug, Serialize)]
+struct CycloneDxMetadata {
+    component: CycloneDxComponent,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct CycloneDxComponent {
+    #[serde(rename = "type")]
+    component_type: String,
+    #[serde(rename = "bom-ref")]
+    bom_ref: String,
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    purl: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct CycloneDxDependencyEntry {
+    #[serde(rename = "ref")]
+    ref_id: String,
+    #[serde(rename = "dependsOn", skip_serializing_if = "Vec::is_empty")]
+    depends_on: Vec<String>,
+}
+
 #[derive(Debug)]
 pub enum ScanError {
     Io {
@@ -319,6 +371,101 @@ pub fn scan_dependencies(path: &Path) -> Result<Vec<Dependency>, ScanError> {
     }
 
     Ok(dedupe_and_sort(dependencies))
+}
+
+pub fn generate_cyclonedx_sbom(path: &Path) -> Result<SbomDocument, ScanError> {
+    let dependencies = scan_dependencies(path)?;
+    let resolved_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let target = resolved_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| resolved_path.display().to_string());
+    let display_path = normalize_windows_verbatim_path(resolved_path.display().to_string());
+    let root_ref = format!("urn:scanr:application:{}", sanitize_ref(&target));
+
+    let mut component_refs = Vec::with_capacity(dependencies.len());
+    let components = dependencies
+        .iter()
+        .map(|dependency| {
+            let purl = package_url(dependency);
+            component_refs.push((purl.clone(), dependency.direct));
+            CycloneDxComponent {
+                component_type: "library".to_string(),
+                bom_ref: purl.clone(),
+                name: dependency.name.clone(),
+                version: Some(dependency.version.clone()),
+                scope: Some(if dependency.direct {
+                    "required".to_string()
+                } else {
+                    "optional".to_string()
+                }),
+                purl: Some(purl),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let metadata = CycloneDxMetadata {
+        component: CycloneDxComponent {
+            component_type: "application".to_string(),
+            bom_ref: root_ref.clone(),
+            name: target.clone(),
+            version: None,
+            scope: None,
+            purl: None,
+        },
+    };
+
+    let direct_dependencies = component_refs
+        .iter()
+        .filter_map(|(ref_id, direct)| if *direct { Some(ref_id.clone()) } else { None })
+        .collect::<Vec<_>>();
+    let mut dependency_graph = Vec::with_capacity(component_refs.len() + 1);
+    dependency_graph.push(CycloneDxDependencyEntry {
+        ref_id: root_ref,
+        depends_on: direct_dependencies,
+    });
+    dependency_graph.extend(component_refs.into_iter().map(|(ref_id, _)| {
+        CycloneDxDependencyEntry {
+            ref_id,
+            depends_on: Vec::new(),
+        }
+    }));
+
+    let bom = CycloneDxBom {
+        bom_format: "CycloneDX",
+        spec_version: "1.5",
+        serial_number: format!(
+            "urn:uuid:{}",
+            deterministic_uuid(&target, &display_path, dependencies.len())
+        ),
+        version: 1,
+        metadata,
+        components,
+        dependencies: dependency_graph,
+    };
+
+    let json = serde_json::to_string_pretty(&bom).map_err(|source| ScanError::Io {
+        path: PathBuf::from("sbom.cdx.json"),
+        source: std::io::Error::other(format!("failed to serialize CycloneDX BOM: {source}")),
+    })?;
+
+    Ok(SbomDocument {
+        target,
+        path: display_path,
+        component_count: dependencies.len(),
+        json,
+    })
+}
+
+fn normalize_windows_verbatim_path(path: String) -> String {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    if let Some(rest) = path.strip_prefix(r"\\?\") {
+        return rest.to_string();
+    }
+    path
 }
 
 pub async fn investigate_vulnerabilities(
@@ -1010,6 +1157,77 @@ fn extract_fixed_versions_from_remediation(remediation: Option<&str>) -> Vec<Str
         .collect()
 }
 
+fn package_url(dependency: &Dependency) -> String {
+    let ecosystem = match dependency.ecosystem {
+        Ecosystem::Node => "npm",
+        Ecosystem::Python => "pypi",
+        Ecosystem::Rust => "cargo",
+    };
+    let name = encode_purl_name(&dependency.name);
+    let version = encode_purl_segment(&dependency.version);
+    format!("pkg:{ecosystem}/{name}@{version}")
+}
+
+fn encode_purl_name(raw: &str) -> String {
+    raw.replace('@', "%40").replace(' ', "%20")
+}
+
+fn encode_purl_segment(raw: &str) -> String {
+    raw.replace(' ', "%20")
+}
+
+fn sanitize_ref(raw: &str) -> String {
+    raw.chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+fn deterministic_uuid(target: &str, path: &str, dependency_count: usize) -> String {
+    let mut first_hasher = DefaultHasher::new();
+    target.hash(&mut first_hasher);
+    path.hash(&mut first_hasher);
+    dependency_count.hash(&mut first_hasher);
+    let first = first_hasher.finish();
+
+    let mut second_hasher = DefaultHasher::new();
+    "scanr-cyclonedx".hash(&mut second_hasher);
+    target.hash(&mut second_hasher);
+    dependency_count.hash(&mut second_hasher);
+    let second = second_hasher.finish();
+
+    let mut bytes = [0u8; 16];
+    bytes[..8].copy_from_slice(&first.to_be_bytes());
+    bytes[8..].copy_from_slice(&second.to_be_bytes());
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15],
+    )
+}
+
 impl Severity {
     fn from_label(label: &str) -> Severity {
         let normalized = label.to_ascii_lowercase();
@@ -1661,5 +1879,42 @@ mod tests {
         let evaluation = evaluate_policy(&summary, &policy);
         assert!(!evaluation.passed);
         assert_eq!(evaluation.violations.len(), 2);
+    }
+
+    #[test]
+    fn generates_cyclonedx_sbom_json() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("valid time")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("scanr-sbom-{unique}"));
+        std::fs::create_dir_all(&root).expect("create temp root");
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"dependencies":{"lodash":"4.17.21"}}"#,
+        )
+        .expect("write package.json");
+
+        let sbom = generate_cyclonedx_sbom(&root).expect("SBOM should generate");
+        let json: serde_json::Value = serde_json::from_str(&sbom.json).expect("valid JSON");
+
+        assert_eq!(
+            json.get("bomFormat").and_then(serde_json::Value::as_str),
+            Some("CycloneDX")
+        );
+        assert_eq!(
+            json.get("specVersion").and_then(serde_json::Value::as_str),
+            Some("1.5")
+        );
+        assert!(
+            json.get("components")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|components| !components.is_empty())
+        );
+        assert!(
+            json.get("dependencies")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|dependencies| !dependencies.is_empty())
+        );
     }
 }
