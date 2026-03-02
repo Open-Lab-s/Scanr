@@ -163,6 +163,103 @@ pub struct UpgradeRecommendation {
     pub major_bump: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
+pub struct SeveritySummary {
+    pub critical: u32,
+    pub high: u32,
+    pub medium: u32,
+    pub low: u32,
+    pub unknown: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ScanResult {
+    pub target: String,
+    pub path: String,
+    pub total_dependencies: u32,
+    pub dependencies: Vec<Dependency>,
+    pub vulnerabilities: Vec<Vulnerability>,
+    pub upgrade_recommendations: Vec<UpgradeRecommendation>,
+    pub risk_score: u32,
+    pub severity_summary: SeveritySummary,
+    pub risk_level: RiskLevel,
+    pub queried_dependencies: u32,
+    pub failed_queries: u32,
+    pub lookup_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SarifReport {
+    pub version: String,
+    pub runs: Vec<SarifRun>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SarifRun {
+    pub tool: SarifTool,
+    pub results: Vec<SarifResult>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SarifTool {
+    pub driver: SarifDriver,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SarifDriver {
+    pub name: String,
+    pub version: String,
+    #[serde(rename = "informationUri")]
+    pub information_uri: String,
+    pub rules: Vec<SarifRule>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SarifRule {
+    pub id: String,
+    #[serde(rename = "shortDescription")]
+    pub short_description: SarifText,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SarifText {
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SarifResult {
+    #[serde(rename = "ruleId")]
+    pub rule_id: String,
+    pub level: String,
+    pub message: SarifText,
+    pub locations: Vec<SarifLocation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SarifLocation {
+    #[serde(rename = "physicalLocation")]
+    pub physical_location: SarifPhysicalLocation,
+    #[serde(rename = "logicalLocations")]
+    pub logical_locations: Vec<SarifLogicalLocation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SarifPhysicalLocation {
+    #[serde(rename = "artifactLocation")]
+    pub artifact_location: SarifArtifactLocation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SarifArtifactLocation {
+    pub uri: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SarifLogicalLocation {
+    pub name: String,
+    pub kind: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SbomDocument {
     pub target: String,
@@ -491,6 +588,118 @@ pub fn generate_cyclonedx_sbom(path: &Path) -> Result<SbomDocument, ScanError> {
         component_count: dependencies.len(),
         json,
     })
+}
+
+pub async fn scan_path(path: &Path) -> Result<ScanResult, ScanError> {
+    let dependencies = scan_dependencies(path)?;
+    let resolved_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let target = resolved_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| resolved_path.display().to_string());
+    let display_path = normalize_windows_verbatim_path(resolved_path.display().to_string());
+
+    let (vulnerability_report, lookup_error) =
+        match investigate_vulnerabilities(&dependencies).await {
+            Ok(report) => (report, None),
+            Err(error) => (
+                VulnerabilityReport {
+                    vulnerabilities: Vec::new(),
+                    upgrade_recommendations: Vec::new(),
+                    queried_dependencies: 0,
+                    failed_queries: 0,
+                },
+                Some(error.to_string()),
+            ),
+        };
+    let risk_summary = summarize_risk(&vulnerability_report.vulnerabilities);
+    let severity_summary = SeveritySummary {
+        critical: to_u32(risk_summary.counts.critical),
+        high: to_u32(risk_summary.counts.high),
+        medium: to_u32(risk_summary.counts.medium),
+        low: to_u32(risk_summary.counts.low),
+        unknown: to_u32(risk_summary.counts.unknown),
+    };
+    let risk_score = calculate_risk_score(&severity_summary);
+
+    Ok(ScanResult {
+        target,
+        path: display_path,
+        total_dependencies: to_u32(dependencies.len()),
+        dependencies,
+        vulnerabilities: vulnerability_report.vulnerabilities,
+        upgrade_recommendations: vulnerability_report.upgrade_recommendations,
+        risk_score,
+        severity_summary,
+        risk_level: risk_summary.risk_level,
+        queried_dependencies: to_u32(vulnerability_report.queried_dependencies),
+        failed_queries: to_u32(vulnerability_report.failed_queries),
+        lookup_error,
+    })
+}
+
+pub fn scan_result_to_sarif(scan_result: &ScanResult) -> SarifReport {
+    let mut rules_by_id = BTreeMap::<String, String>::new();
+    for vulnerability in &scan_result.vulnerabilities {
+        rules_by_id
+            .entry(vulnerability.cve_id.clone())
+            .or_insert_with(|| short_message_from_description(&vulnerability.description));
+    }
+
+    let rules = rules_by_id
+        .into_iter()
+        .map(|(id, description)| SarifRule {
+            id,
+            short_description: SarifText { text: description },
+        })
+        .collect::<Vec<_>>();
+
+    let artifact_uri = sarif_artifact_uri(&scan_result.path);
+    let results = scan_result
+        .vulnerabilities
+        .iter()
+        .map(|vulnerability| {
+            let package_name = package_name_from_description(&vulnerability.description);
+            SarifResult {
+                rule_id: vulnerability.cve_id.clone(),
+                level: sarif_level(vulnerability.severity).to_string(),
+                message: SarifText {
+                    text: vulnerability.description.clone(),
+                },
+                locations: vec![SarifLocation {
+                    physical_location: SarifPhysicalLocation {
+                        artifact_location: SarifArtifactLocation {
+                            uri: artifact_uri.clone(),
+                        },
+                    },
+                    logical_locations: vec![SarifLogicalLocation {
+                        name: if package_name.is_empty() {
+                            "dependency".to_string()
+                        } else {
+                            package_name
+                        },
+                        kind: "package".to_string(),
+                    }],
+                }],
+            }
+        })
+        .collect::<Vec<_>>();
+
+    SarifReport {
+        version: "2.1.0".to_string(),
+        runs: vec![SarifRun {
+            tool: SarifTool {
+                driver: SarifDriver {
+                    name: "Scanr".to_string(),
+                    version: env!("CARGO_PKG_VERSION").to_string(),
+                    information_uri: "https://github.com/Scanr/Scanr".to_string(),
+                    rules,
+                },
+            },
+            results,
+        }],
+    }
 }
 
 pub fn diff_cyclonedx_sbom_files(
@@ -1503,6 +1712,48 @@ fn decode_hex_pair(high: u8, low: u8) -> Option<u8> {
     Some((high << 4) | low)
 }
 
+fn to_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+fn calculate_risk_score(summary: &SeveritySummary) -> u32 {
+    summary
+        .critical
+        .saturating_mul(100)
+        .saturating_add(summary.high.saturating_mul(40))
+        .saturating_add(summary.medium.saturating_mul(10))
+        .saturating_add(summary.low)
+        .saturating_add(summary.unknown.saturating_mul(5))
+}
+
+fn short_message_from_description(description: &str) -> String {
+    description
+        .split_once(':')
+        .map(|(_, message)| message.trim().to_string())
+        .filter(|message| !message.is_empty())
+        .unwrap_or_else(|| description.to_string())
+}
+
+fn package_name_from_description(description: &str) -> String {
+    description
+        .split_once(':')
+        .map(|(name, _)| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_default()
+}
+
+fn sarif_artifact_uri(path: &str) -> String {
+    path.replace('\\', "/")
+}
+
+fn sarif_level(severity: Severity) -> &'static str {
+    match severity {
+        Severity::Critical | Severity::High => "error",
+        Severity::Medium => "warning",
+        Severity::Low | Severity::Unknown => "note",
+    }
+}
+
 fn sanitize_ref(raw: &str) -> String {
     raw.chars()
         .map(|ch| {
@@ -2312,5 +2563,56 @@ mod tests {
                 .iter()
                 .any(|dependency| dependency.name == "axios" && dependency.version == "1.2.0")
         );
+    }
+
+    #[test]
+    fn sarif_output_maps_severity_levels() {
+        let scan_result = ScanResult {
+            target: "demo".to_string(),
+            path: "F:\\demo".to_string(),
+            total_dependencies: 2,
+            dependencies: vec![],
+            vulnerabilities: vec![
+                Vulnerability {
+                    cve_id: "CVE-2026-0001".to_string(),
+                    severity: Severity::High,
+                    score: None,
+                    affected_version: "1.0.0".to_string(),
+                    description: "lodash: high issue".to_string(),
+                    references: vec![],
+                    remediation: None,
+                },
+                Vulnerability {
+                    cve_id: "CVE-2026-0002".to_string(),
+                    severity: Severity::Low,
+                    score: None,
+                    affected_version: "2.0.0".to_string(),
+                    description: "axios: low issue".to_string(),
+                    references: vec![],
+                    remediation: None,
+                },
+            ],
+            upgrade_recommendations: vec![],
+            risk_score: 41,
+            severity_summary: SeveritySummary {
+                critical: 0,
+                high: 1,
+                medium: 0,
+                low: 1,
+                unknown: 0,
+            },
+            risk_level: RiskLevel::High,
+            queried_dependencies: 2,
+            failed_queries: 0,
+            lookup_error: None,
+        };
+
+        let sarif = scan_result_to_sarif(&scan_result);
+        assert_eq!(sarif.version, "2.1.0");
+        assert_eq!(sarif.runs.len(), 1);
+        assert_eq!(sarif.runs[0].tool.driver.name, "Scanr");
+        assert_eq!(sarif.runs[0].results.len(), 2);
+        assert_eq!(sarif.runs[0].results[0].level, "error");
+        assert_eq!(sarif.runs[0].results[1].level, "note");
     }
 }
