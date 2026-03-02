@@ -92,6 +92,7 @@ pub struct Vulnerability {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct VulnerabilityReport {
     pub vulnerabilities: Vec<Vulnerability>,
+    pub upgrade_recommendations: Vec<UpgradeRecommendation>,
     pub queried_dependencies: usize,
     pub failed_queries: usize,
 }
@@ -150,6 +151,15 @@ impl Default for PolicyConfig {
 pub struct PolicyEvaluation {
     pub passed: bool,
     pub violations: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UpgradeRecommendation {
+    pub package_name: String,
+    pub ecosystem: Ecosystem,
+    pub current_version: String,
+    pub suggested_version: String,
+    pub major_bump: bool,
 }
 
 #[derive(Debug)]
@@ -317,6 +327,7 @@ pub async fn investigate_vulnerabilities(
     if dependencies.is_empty() {
         return Ok(VulnerabilityReport {
             vulnerabilities: Vec::new(),
+            upgrade_recommendations: Vec::new(),
             queried_dependencies: 0,
             failed_queries: 0,
         });
@@ -330,6 +341,7 @@ pub async fn investigate_vulnerabilities(
     let queried_dependencies = targets.len();
     let mut failed_queries = 0usize;
     let mut vulnerabilities = Vec::new();
+    let mut recommendations = Vec::new();
 
     let mut tasks = stream::iter(targets.into_iter().map(|target| {
         let client = client.clone();
@@ -339,7 +351,12 @@ pub async fn investigate_vulnerabilities(
 
     while let Some(result) = tasks.next().await {
         match result {
-            Ok(vulns) => vulnerabilities.extend(vulns),
+            Ok(package_result) => {
+                vulnerabilities.extend(package_result.vulnerabilities);
+                if let Some(recommendation) = package_result.recommendation {
+                    recommendations.push(recommendation);
+                }
+            }
             Err(_) => failed_queries += 1,
         }
     }
@@ -350,9 +367,19 @@ pub async fn investigate_vulnerabilities(
             && a.affected_version == b.affected_version
             && a.description == b.description
     });
+    recommendations.sort_by(|a, b| {
+        (a.ecosystem, a.package_name.as_str()).cmp(&(b.ecosystem, b.package_name.as_str()))
+    });
+    recommendations.dedup_by(|a, b| {
+        a.ecosystem == b.ecosystem
+            && a.package_name == b.package_name
+            && a.current_version == b.current_version
+            && a.suggested_version == b.suggested_version
+    });
 
     Ok(VulnerabilityReport {
         vulnerabilities,
+        upgrade_recommendations: recommendations,
         queried_dependencies,
         failed_queries,
     })
@@ -444,6 +471,12 @@ struct VulnerabilityTarget {
     version: Version,
 }
 
+#[derive(Debug)]
+struct PackageInvestigationResult {
+    vulnerabilities: Vec<Vulnerability>,
+    recommendation: Option<UpgradeRecommendation>,
+}
+
 fn prepare_vulnerability_targets(dependencies: &[Dependency]) -> Vec<VulnerabilityTarget> {
     let mut targets = Vec::new();
     let mut seen = BTreeSet::new();
@@ -472,7 +505,7 @@ fn prepare_vulnerability_targets(dependencies: &[Dependency]) -> Vec<Vulnerabili
 async fn fetch_vulnerabilities_for_dependency(
     client: &reqwest::Client,
     target: VulnerabilityTarget,
-) -> Result<Vec<Vulnerability>, ScanError> {
+) -> Result<PackageInvestigationResult, ScanError> {
     let ecosystem = osv_ecosystem(target.dependency.ecosystem);
     let request = OsvQueryRequest {
         package: OsvPackageQuery {
@@ -484,7 +517,7 @@ async fn fetch_vulnerabilities_for_dependency(
     let payload = query_osv_with_retry(client, &request).await?;
 
     let mut vulnerabilities = Vec::new();
-    for vuln in payload.vulns {
+    for vuln in &payload.vulns {
         if !vulnerability_applies_to_dependency(&vuln, &target.dependency, &target.version) {
             continue;
         }
@@ -518,7 +551,14 @@ async fn fetch_vulnerabilities_for_dependency(
         });
     }
 
-    Ok(vulnerabilities)
+    let recommendation = recommend_safe_upgrade(client, &target, &payload.vulns, &vulnerabilities)
+        .await
+        .unwrap_or(None);
+
+    Ok(PackageInvestigationResult {
+        vulnerabilities,
+        recommendation,
+    })
 }
 
 async fn query_osv_with_retry(
@@ -556,6 +596,127 @@ async fn query_osv_with_retry(
     Err(ScanError::Io {
         path: PathBuf::from(OSV_QUERY_URL),
         source: std::io::Error::other("OSV query retry loop exhausted"),
+    })
+}
+
+async fn recommend_safe_upgrade(
+    client: &reqwest::Client,
+    target: &VulnerabilityTarget,
+    package_vulns: &[OsvVulnerability],
+    current_vulnerabilities: &[Vulnerability],
+) -> Result<Option<UpgradeRecommendation>, ScanError> {
+    if current_vulnerabilities.is_empty() {
+        return Ok(None);
+    }
+
+    let registry_versions =
+        fetch_registry_versions(client, target.dependency.ecosystem, &target.dependency.name)
+            .await?;
+
+    let mut candidates = registry_versions
+        .into_iter()
+        .filter_map(|raw| parse_semverish(&raw).map(|parsed| (raw, parsed)))
+        .collect::<Vec<_>>();
+    candidates.sort_by(|(_, left), (_, right)| left.cmp(right));
+
+    let suggested = candidates.into_iter().find(|(_raw, parsed)| {
+        parsed >= &target.version
+            && !version_is_vulnerable_for_dependency(
+                package_vulns,
+                &target.dependency,
+                parsed,
+                &target.dependency.version,
+            )
+    });
+
+    let fallback = current_vulnerabilities
+        .iter()
+        .flat_map(|vulnerability| {
+            extract_fixed_versions_from_remediation(vulnerability.remediation.as_deref())
+        })
+        .filter_map(|raw| parse_semverish(&raw).map(|parsed| (raw, parsed)))
+        .min_by(|(_, left), (_, right)| left.cmp(right));
+
+    let (suggested_raw, suggested_parsed) = if let Some(found) = suggested {
+        found
+    } else if let Some(found) = fallback {
+        found
+    } else {
+        return Ok(None);
+    };
+
+    Ok(Some(UpgradeRecommendation {
+        package_name: target.dependency.name.clone(),
+        ecosystem: target.dependency.ecosystem,
+        current_version: target.dependency.version.clone(),
+        suggested_version: suggested_raw,
+        major_bump: suggested_parsed.major > target.version.major,
+    }))
+}
+
+async fn fetch_registry_versions(
+    client: &reqwest::Client,
+    ecosystem: Ecosystem,
+    package_name: &str,
+) -> Result<Vec<String>, ScanError> {
+    match ecosystem {
+        Ecosystem::Node => {
+            let encoded = package_name.replace('/', "%2F");
+            let url = format!("https://registry.npmjs.org/{encoded}");
+            let payload = query_registry_json_with_retry(client, &url).await?;
+            let versions = payload
+                .get("versions")
+                .and_then(JsonValue::as_object)
+                .map(|entries| entries.keys().cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
+            Ok(versions)
+        }
+        Ecosystem::Python => {
+            let url = format!("https://pypi.org/pypi/{package_name}/json");
+            let payload = query_registry_json_with_retry(client, &url).await?;
+            let versions = payload
+                .get("releases")
+                .and_then(JsonValue::as_object)
+                .map(|entries| entries.keys().cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
+            Ok(versions)
+        }
+        Ecosystem::Rust => Ok(Vec::new()),
+    }
+}
+
+async fn query_registry_json_with_retry(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<JsonValue, ScanError> {
+    for attempt in 0..=OSV_MAX_RETRIES {
+        let result = client.get(url).send().await;
+        match result {
+            Ok(response) => {
+                let status = response.status();
+                if status.is_success() {
+                    return response.json().await.map_err(ScanError::from);
+                }
+                if attempt < OSV_MAX_RETRIES && is_retryable_status(status) {
+                    sleep(backoff_for_attempt(attempt)).await;
+                    continue;
+                }
+                let error = response.error_for_status().unwrap_err();
+                return Err(ScanError::Http(error));
+            }
+            Err(error) => {
+                if attempt < OSV_MAX_RETRIES && is_retryable_error(&error) {
+                    sleep(backoff_for_attempt(attempt)).await;
+                    continue;
+                }
+                return Err(ScanError::Http(error));
+            }
+        }
+    }
+
+    Err(ScanError::Io {
+        path: PathBuf::from("registry query"),
+        source: std::io::Error::other("registry query retry loop exhausted"),
     })
 }
 
@@ -608,6 +769,32 @@ fn vulnerability_applies_to_dependency(
     }
 
     false
+}
+
+fn version_is_vulnerable_for_dependency(
+    vulnerabilities: &[OsvVulnerability],
+    dependency: &Dependency,
+    candidate_version: &Version,
+    candidate_raw: &str,
+) -> bool {
+    vulnerabilities.iter().any(|vulnerability| {
+        vulnerability.affected.iter().any(|affected| {
+            if let Some(package) = &affected.package {
+                if !package.name.is_empty() && !package.name.eq_ignore_ascii_case(&dependency.name)
+                {
+                    return false;
+                }
+                if !package.ecosystem.is_empty()
+                    && !package
+                        .ecosystem
+                        .eq_ignore_ascii_case(osv_ecosystem(dependency.ecosystem))
+                {
+                    return false;
+                }
+            }
+            affected_versions_match(affected, candidate_version, candidate_raw)
+        })
+    })
 }
 
 fn affected_versions_match(
@@ -804,6 +991,23 @@ fn extract_remediation(
         dependency.name,
         ordered_fixed.join(", ")
     ))
+}
+
+fn extract_fixed_versions_from_remediation(remediation: Option<&str>) -> Vec<String> {
+    let Some(remediation) = remediation else {
+        return Vec::new();
+    };
+    let Some((_, tail)) = remediation.split_once("one of:") else {
+        return Vec::new();
+    };
+
+    tail.trim()
+        .trim_end_matches(')')
+        .trim_end_matches('.')
+        .split(',')
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+        .collect()
 }
 
 impl Severity {
