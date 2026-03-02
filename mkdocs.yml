@@ -1,5 +1,5 @@
 site_name: Scanr
-site_description: Security-first dependency scanning CLI
+site_description: Open-source DevSecOps engine with a modular Rust CLI and core library
 repo_url: https://github.com/Open-Lab-s/Scanr
 repo_name: Open-Lab-s/Scanr
 
@@ -8,6 +8,10 @@ theme:
 
 nav:
   - Home: index.md
+  - Scanr CLI: cli.md
+  - Scanr Core: core.md
+  - Installation: installation.md
+  - Development: development.md
 
 plugins:
   - search
