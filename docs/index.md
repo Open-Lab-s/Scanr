@@ -9,11 +9,19 @@ The repository is organized as a Rust workspace with two primary crates:
 
 ## Current Milestone
 
-Milestone 1 provides a working CLI skeleton with placeholder behavior:
+Milestone 2 adds dependency parsing for Node.js, Python, and Rust projects:
 
 - `scanr scan .`
 - `scanr sbom generate`
 - `scanr sbom diff old.json new.json`
+
+Current `scanr scan <path>` support:
+
+- Node.js: `package.json`, `package-lock.json`, `npm-shrinkwrap.json`
+- Python: `requirements.txt`, `pyproject.toml`, `poetry.lock`
+- Rust: `Cargo.toml`, `Cargo.lock`
+
+Use `scanr scan <path> --recursive` to scan nested projects in monorepos.
 
 ## Workspace Layout
 

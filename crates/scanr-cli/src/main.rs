@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process;
+use std::process;
 
 use clap::{Parser, Subcommand};
 use serde::Serialize;
@@ -27,6 +28,9 @@ enum Commands {
         /// Write raw JSON payload to a file.
         #[arg(long, value_name = "FILE")]
         raw_json_out: Option<PathBuf>,
+        /// Recursively scan subdirectories for supported manifest files.
+        #[arg(short, long)]
+        recursive: bool,
     },
     /// Software bill of materials operations.
     Sbom {
