@@ -18,6 +18,9 @@ enum Commands {
     Scan {
         /// Path to scan.
         path: PathBuf,
+        /// Enable CI mode with policy enforcement from scanr.toml.
+        #[arg(short = 'c', long = "ci")]
+        ci: bool,
         /// Print parsed dependencies before vulnerability output.
         #[arg(long)]
         list_deps: bool,
@@ -55,10 +58,15 @@ enum SbomCommands {
 struct ScanRawOutput {
     target: String,
     path: String,
+    ci_mode: bool,
     dependencies_analyzed: usize,
     queried_dependencies: usize,
     failed_queries: usize,
     lookup_error: Option<String>,
+    risk_summary: scanr_core::RiskSummary,
+    policy_path: Option<String>,
+    policy: Option<scanr_core::PolicyConfig>,
+    policy_evaluation: Option<scanr_core::PolicyEvaluation>,
     dependencies: Vec<scanr_core::Dependency>,
     vulnerabilities: Vec<scanr_core::Vulnerability>,
 }
@@ -70,6 +78,7 @@ async fn main() {
     match cli.command {
         Commands::Scan {
             path,
+            ci,
             list_deps,
             raw_json,
             raw_json_out,
@@ -134,6 +143,10 @@ async fn main() {
                     );
                 }
 
+                let risk_summary =
+                    scanr_core::summarize_risk(&vulnerability_report.vulnerabilities);
+                print_risk_summary(&risk_summary);
+
                 if vulnerability_report.failed_queries > 0 {
                     println!();
                     eprintln!(
@@ -150,13 +163,75 @@ async fn main() {
                     );
                 }
 
+                let mut ci_exit_code = 0i32;
+                let mut policy_path_display = None;
+                let mut policy = None;
+                let mut policy_evaluation = None;
+
+                if ci {
+                    println!();
+                    println!("CI Policy Check");
+                    match scanr_core::load_policy_for_target(&path) {
+                        Ok((loaded_policy, loaded_policy_path)) => {
+                            if let Some(policy_path) = loaded_policy_path {
+                                let normalized = normalize_windows_verbatim_path(
+                                    policy_path.display().to_string(),
+                                );
+                                println!("Policy file: {normalized}");
+                                policy_path_display = Some(normalized);
+                            } else {
+                                println!(
+                                    "Policy file: not found (using defaults max_critical=0, max_high=0)"
+                                );
+                            }
+                            println!(
+                                "Rules: max_critical={} | max_high={}",
+                                loaded_policy.max_critical, loaded_policy.max_high
+                            );
+
+                            let evaluation =
+                                scanr_core::evaluate_policy(&risk_summary, &loaded_policy);
+                            if evaluation.passed {
+                                println!("Result: PASS");
+                            } else {
+                                println!("Result: FAIL");
+                                println!("Violations:");
+                                for violation in &evaluation.violations {
+                                    println!("- {violation}");
+                                }
+                                ci_exit_code = 2;
+                            }
+
+                            if lookup_error.is_some() || vulnerability_report.failed_queries > 0 {
+                                println!("Result: FAIL");
+                                println!(
+                                    "- vulnerability lookup incomplete; CI mode requires complete OSV results"
+                                );
+                                ci_exit_code = 3;
+                            }
+
+                            policy = Some(loaded_policy);
+                            policy_evaluation = Some(evaluation);
+                        }
+                        Err(error) => {
+                            eprintln!("Failed to load policy: {error}");
+                            process::exit(2);
+                        }
+                    }
+                }
+
                 let payload = ScanRawOutput {
                     target: target_name,
                     path: target_path,
+                    ci_mode: ci,
                     dependencies_analyzed: dependencies.len(),
                     queried_dependencies: vulnerability_report.queried_dependencies,
                     failed_queries: vulnerability_report.failed_queries,
-                    lookup_error,
+                    lookup_error: lookup_error.clone(),
+                    risk_summary,
+                    policy_path: policy_path_display,
+                    policy,
+                    policy_evaluation,
                     dependencies,
                     vulnerabilities: vulnerability_report.vulnerabilities,
                 };
@@ -164,6 +239,10 @@ async fn main() {
                 if let Err(error) = emit_raw_output(&payload, raw_json, &raw_json_out) {
                     eprintln!("Failed to emit raw JSON: {error}");
                     process::exit(1);
+                }
+
+                if ci_exit_code != 0 {
+                    process::exit(ci_exit_code);
                 }
             }
             Err(error) => {
@@ -240,6 +319,20 @@ fn print_vulnerability_table(vulnerabilities: &[scanr_core::Vulnerability]) {
             truncate_cell(&fix_hint, 46),
         );
     }
+}
+
+fn print_risk_summary(summary: &scanr_core::RiskSummary) {
+    println!();
+    println!("Risk Summary");
+    println!(
+        "critical: {} | high: {} | medium: {} | low: {} | unknown: {}",
+        summary.counts.critical,
+        summary.counts.high,
+        summary.counts.medium,
+        summary.counts.low,
+        summary.counts.unknown
+    );
+    println!("risk level: {}", summary.risk_level);
 }
 
 fn package_name_from_description(description: &str) -> String {
