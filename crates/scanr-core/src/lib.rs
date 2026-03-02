@@ -97,6 +97,62 @@ pub struct VulnerabilityReport {
     pub failed_queries: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum RiskLevel {
+    Low,
+    Moderate,
+    High,
+}
+
+impl Display for RiskLevel {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Low => write!(f, "LOW"),
+            Self::Moderate => write!(f, "MODERATE"),
+            Self::High => write!(f, "HIGH"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+pub struct SeverityCounts {
+    pub critical: usize,
+    pub high: usize,
+    pub medium: usize,
+    pub low: usize,
+    pub unknown: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct RiskSummary {
+    pub total: usize,
+    pub counts: SeverityCounts,
+    pub risk_level: RiskLevel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PolicyConfig {
+    pub max_critical: usize,
+    pub max_high: usize,
+}
+
+impl Default for PolicyConfig {
+    fn default() -> Self {
+        Self {
+            max_critical: 0,
+            max_high: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PolicyEvaluation {
+    pub passed: bool,
+    pub violations: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct UpgradeRecommendation {
     pub package_name: String,
@@ -327,6 +383,86 @@ pub async fn investigate_vulnerabilities(
         queried_dependencies,
         failed_queries,
     })
+}
+
+pub fn summarize_risk(vulnerabilities: &[Vulnerability]) -> RiskSummary {
+    let mut counts = SeverityCounts::default();
+    for vulnerability in vulnerabilities {
+        match vulnerability.severity {
+            Severity::Critical => counts.critical += 1,
+            Severity::High => counts.high += 1,
+            Severity::Medium => counts.medium += 1,
+            Severity::Low => counts.low += 1,
+            Severity::Unknown => counts.unknown += 1,
+        }
+    }
+
+    let risk_level = if counts.critical > 0 || counts.high > 0 {
+        RiskLevel::High
+    } else if counts.medium > 0 || counts.unknown > 0 {
+        RiskLevel::Moderate
+    } else {
+        RiskLevel::Low
+    };
+
+    RiskSummary {
+        total: vulnerabilities.len(),
+        counts,
+        risk_level,
+    }
+}
+
+pub fn evaluate_policy(summary: &RiskSummary, policy: &PolicyConfig) -> PolicyEvaluation {
+    let mut violations = Vec::new();
+
+    if summary.counts.critical > policy.max_critical {
+        violations.push(format!(
+            "critical vulnerabilities {} exceed max_critical {}",
+            summary.counts.critical, policy.max_critical
+        ));
+    }
+    if summary.counts.high > policy.max_high {
+        violations.push(format!(
+            "high vulnerabilities {} exceed max_high {}",
+            summary.counts.high, policy.max_high
+        ));
+    }
+
+    PolicyEvaluation {
+        passed: violations.is_empty(),
+        violations,
+    }
+}
+
+pub fn load_policy_for_target(
+    target_path: &Path,
+) -> Result<(PolicyConfig, Option<PathBuf>), ScanError> {
+    let policy_path = resolve_policy_path(target_path);
+    match fs::read_to_string(&policy_path) {
+        Ok(contents) => {
+            let policy =
+                toml::from_str::<PolicyConfig>(&contents).map_err(|source| ScanError::Toml {
+                    path: policy_path.clone(),
+                    source,
+                })?;
+            Ok((policy, Some(policy_path)))
+        }
+        Err(source) if source.kind() == ErrorKind::NotFound => Ok((PolicyConfig::default(), None)),
+        Err(source) => Err(ScanError::Io {
+            path: policy_path,
+            source,
+        }),
+    }
+}
+
+fn resolve_policy_path(target_path: &Path) -> PathBuf {
+    if target_path.is_file() {
+        return target_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("scanr.toml");
+    }
+    target_path.join("scanr.toml")
 }
 
 #[derive(Debug, Clone)]
@@ -1472,5 +1608,58 @@ mod tests {
     fn semver_normalization_handles_prefixes() {
         let normalized = parse_semverish("^1.2").expect("version should normalize");
         assert_eq!(normalized, Version::parse("1.2.0").expect("valid semver"));
+    }
+
+    #[test]
+    fn summarizes_risk_levels() {
+        let vulnerabilities = vec![
+            Vulnerability {
+                cve_id: "CVE-1".to_string(),
+                severity: Severity::Low,
+                score: None,
+                affected_version: "1.0.0".to_string(),
+                description: "a".to_string(),
+                references: vec![],
+                remediation: None,
+            },
+            Vulnerability {
+                cve_id: "CVE-2".to_string(),
+                severity: Severity::High,
+                score: None,
+                affected_version: "1.0.0".to_string(),
+                description: "b".to_string(),
+                references: vec![],
+                remediation: None,
+            },
+        ];
+
+        let summary = summarize_risk(&vulnerabilities);
+        assert_eq!(summary.total, 2);
+        assert_eq!(summary.counts.high, 1);
+        assert_eq!(summary.counts.low, 1);
+        assert_eq!(summary.risk_level, RiskLevel::High);
+    }
+
+    #[test]
+    fn policy_evaluation_flags_violations() {
+        let summary = RiskSummary {
+            total: 3,
+            counts: SeverityCounts {
+                critical: 1,
+                high: 2,
+                medium: 0,
+                low: 0,
+                unknown: 0,
+            },
+            risk_level: RiskLevel::High,
+        };
+        let policy = PolicyConfig {
+            max_critical: 0,
+            max_high: 1,
+        };
+
+        let evaluation = evaluate_policy(&summary, &policy);
+        assert!(!evaluation.passed);
+        assert_eq!(evaluation.violations.len(), 2);
     }
 }
