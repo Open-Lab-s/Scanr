@@ -5,6 +5,11 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (for manual runs), e.g. v0.1.0"
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -86,6 +91,24 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - name: Resolve release tag
+        id: release_tag
+        shell: bash
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "tag=${GITHUB_REF_NAME}" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          MANUAL_TAG="${{ github.event.inputs.tag }}"
+          if [ -n "${MANUAL_TAG}" ]; then
+            echo "tag=${MANUAL_TAG}" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          echo "No tag found. Push a v* tag or provide workflow_dispatch input 'tag'." >&2
+          exit 1
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -102,6 +125,7 @@ jobs:
       - name: Publish release assets
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.release_tag.outputs.tag }}
           files: |
             dist/scanr-*
             dist/sha256sums.txt
