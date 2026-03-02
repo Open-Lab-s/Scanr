@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::process;
 
 use clap::{Parser, Subcommand};
 
@@ -15,6 +16,9 @@ enum Commands {
     Scan {
         /// Path to scan.
         path: PathBuf,
+        /// Recursively scan subdirectories for supported manifest files.
+        #[arg(short, long)]
+        recursive: bool,
     },
     /// Software bill of materials operations.
     Sbom {
@@ -40,12 +44,27 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Scan { path } => {
-            println!(
-                "Placeholder: scanning '{}' ({})",
-                path.display(),
-                scanr_core::placeholder_status()
-            );
+        Commands::Scan { path, recursive } => {
+            match scanr_core::scan_dependencies_with_options(&path, recursive) {
+                Ok(dependencies) => {
+                    if dependencies.is_empty() {
+                        println!("No dependencies found in '{}'.", path.display());
+                    } else {
+                        println!("Dependencies found in '{}':", path.display());
+                        for dep in dependencies {
+                            let kind = if dep.direct { "direct" } else { "transitive" };
+                            println!(
+                                "- [{}] {} {} ({})",
+                                dep.ecosystem, dep.name, dep.version, kind
+                            );
+                        }
+                    }
+                }
+                Err(error) => {
+                    eprintln!("Scan failed: {error}");
+                    process::exit(1);
+                }
+            }
         }
         Commands::Sbom { command } => match command {
             SbomCommands::Generate => {

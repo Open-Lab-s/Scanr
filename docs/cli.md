@@ -14,6 +14,7 @@ Current command structure:
 
 ```bash
 scanr scan <path>
+scanr scan <path> --recursive
 scanr sbom generate
 scanr sbom diff <old.json> <new.json>
 ```
@@ -22,6 +23,7 @@ Examples:
 
 ```bash
 scanr scan .
+scanr scan . --recursive
 scanr sbom generate
 scanr sbom diff old.json new.json
 ```
@@ -33,10 +35,11 @@ scanr --help
 scanr --version
 ```
 
-## Current Behavior (Milestone 1)
+## Current Behavior (Milestone 2)
 
-Commands print placeholder output and complete without panic.
-This milestone establishes command contracts; scanning and SBOM logic will be implemented in later milestones.
+- `scanr scan <path>` prints parsed dependencies.
+- `--recursive` scans subdirectories for supported package manifests.
+- `scanr sbom generate` and `scanr sbom diff` are command placeholders for upcoming milestones.
 
 ## Crate Location
 

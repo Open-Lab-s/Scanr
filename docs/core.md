@@ -14,9 +14,26 @@
 - Better reuse across binaries and integrations
 - Lower coupling between command UX and analysis engine internals
 
-## Current State (Milestone 1)
+## Current State (Milestone 2)
 
-`scanr-core` is intentionally minimal and provides placeholder functionality while the CLI skeleton is being validated.
+`scanr-core` now provides dependency parsing primitives used by `scanr-cli`:
+
+- Node.js: `package.json`, `package-lock.json`
+- Python: `requirements.txt`, `pyproject.toml`, `poetry.lock`
+- Rust: `Cargo.toml`, `Cargo.lock`
+
+The crate returns normalized dependency records with ecosystem and direct/transitive flags.
+
+Core dependency model:
+
+```rust
+pub struct Dependency {
+    pub name: String,
+    pub version: String,
+    pub ecosystem: Ecosystem,
+    pub direct: bool,
+}
+```
 
 ## Planned Direction
 

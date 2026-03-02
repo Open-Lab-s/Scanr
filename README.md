@@ -43,10 +43,12 @@ brew install scanr
 paru -S scanr
 ```
 
-Run placeholder commands:
+Run commands:
 
 ```bash
 cargo run -p scanr-cli -- scan .
 cargo run -p scanr-cli -- sbom generate
 cargo run -p scanr-cli -- sbom diff old.json new.json
 ```
+
+`scanr scan <path>` supports custom paths and can recursively scan manifest files with `--recursive`.
