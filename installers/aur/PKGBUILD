@@ -4,11 +4,11 @@ pkgrel=1
 pkgdesc="DevSecOps security engine CLI"
 arch=("x86_64" "aarch64")
 url="https://github.com/scanr-dev/scanr"
-license=("Apache")
-depends=()
+license=("Apache-2.0")
+depends=("gcc-libs")
 makedepends=("cargo")
 source=("$pkgname-$pkgver.tar.gz::https://github.com/scanr-dev/scanr/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=("REPLACE_WITH_SHA256")
+sha256sums=("SKIP")
 
 build() {
   cd "$srcdir/$pkgname-$pkgver"
