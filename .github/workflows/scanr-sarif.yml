@@ -1,0 +1,37 @@
+name: Scanr SARIF
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  security-events: write
+
+jobs:
+  sarif:
+    name: Generate and Upload SARIF
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Scanr
+        run: cargo build --workspace --release
+
+      - name: Generate SARIF
+        run: ./target/release/scanr scan . --sarif > scanr.sarif
+
+      - name: Upload SARIF to GitHub Security
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: scanr.sarif
