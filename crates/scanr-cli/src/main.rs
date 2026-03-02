@@ -5,11 +5,13 @@ use std::process;
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 
+mod tui;
+
 #[derive(Debug, Parser)]
 #[command(name = "scanr", about = "Scanr CLI", version)]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -95,7 +97,13 @@ async fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Scan {
+        None => {
+            if let Err(error) = tui::run_tui(PathBuf::from(".")) {
+                eprintln!("TUI failed: {error}");
+                process::exit(1);
+            }
+        }
+        Some(Commands::Scan {
             path,
             ci,
             json,
@@ -104,7 +112,7 @@ async fn main() {
             raw_json,
             raw_json_out,
             recursive: _,
-        } => {
+        }) => {
             if json || sarif {
                 match scanr_core::scan_path(&path).await {
                     Ok(scan_result) => {
@@ -325,7 +333,7 @@ async fn main() {
                 }
             }
         }
-        Commands::Sbom { command } => match command {
+        Some(Commands::Sbom { command }) => match command {
             SbomCommands::Generate { path, output } => {
                 match scanr_core::generate_cyclonedx_sbom(&path) {
                     Ok(sbom) => {
