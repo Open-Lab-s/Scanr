@@ -1,7 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process;
-use std::process;
 
 use clap::{Parser, Subcommand};
 use serde::Serialize;
@@ -74,6 +73,7 @@ async fn main() {
             list_deps,
             raw_json,
             raw_json_out,
+            recursive: _,
         } => match scanr_core::scan_dependencies(&path) {
             Ok(dependencies) => {
                 if dependencies.is_empty() {
