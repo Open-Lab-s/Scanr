@@ -55,13 +55,13 @@ jobs:
         if: ${{ !matrix.use_cross }}
         shell: bash
         run: |
-          cargo build --release --locked --package scanr-cli --bin scanr --target "${{ matrix.target }}"
+          cargo build --release --package scanr-cli --bin scanr --target "${{ matrix.target }}"
 
       - name: Build binary (cross)
         if: matrix.use_cross
         shell: bash
         run: |
-          cross build --release --locked --package scanr-cli --bin scanr --target "${{ matrix.target }}"
+          cross build --release --package scanr-cli --bin scanr --target "${{ matrix.target }}"
 
       - name: Collect artifact (unix)
         if: runner.os != 'Windows'
