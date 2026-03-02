@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "crates/scanr-core",
+    "crates/scanr-cli",
+]
+resolver = "2"
+

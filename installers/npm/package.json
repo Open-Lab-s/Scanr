@@ -1,0 +1,15 @@
+{
+  "name": "@scanr/cli",
+  "version": "0.1.0",
+  "description": "Scanr CLI distribution package.",
+  "license": "Apache-2.0",
+  "bin": {
+    "scanr": "./bin/scanr.js"
+  },
+  "files": [
+    "bin"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}

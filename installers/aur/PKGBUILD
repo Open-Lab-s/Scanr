@@ -1,0 +1,21 @@
+pkgname=scanr
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="DevSecOps security engine CLI"
+arch=("x86_64" "aarch64")
+url="https://github.com/scanr-dev/scanr"
+license=("Apache")
+depends=()
+makedepends=("cargo")
+source=("$pkgname-$pkgver.tar.gz::https://github.com/scanr-dev/scanr/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=("REPLACE_WITH_SHA256")
+
+build() {
+  cd "$srcdir/$pkgname-$pkgver"
+  cargo build --release --locked --package scanr-cli --bin scanr
+}
+
+package() {
+  cd "$srcdir/$pkgname-$pkgver"
+  install -Dm755 "target/release/scanr" "$pkgdir/usr/bin/scanr"
+}
