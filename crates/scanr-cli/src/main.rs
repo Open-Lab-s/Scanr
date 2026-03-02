@@ -61,6 +61,7 @@ struct ScanRawOutput {
     lookup_error: Option<String>,
     dependencies: Vec<scanr_core::Dependency>,
     vulnerabilities: Vec<scanr_core::Vulnerability>,
+    upgrade_recommendations: Vec<scanr_core::UpgradeRecommendation>,
 }
 
 #[tokio::main]
@@ -111,6 +112,7 @@ async fn main() {
                         Err(error) => (
                             scanr_core::VulnerabilityReport {
                                 vulnerabilities: Vec::new(),
+                                upgrade_recommendations: Vec::new(),
                                 queried_dependencies: 0,
                                 failed_queries: 0,
                             },
@@ -131,6 +133,17 @@ async fn main() {
                     println!();
                     println!(
                         "Use --raw-json or --raw-json-out <file> for full advisory details/references."
+                    );
+                }
+
+                if !vulnerability_report.upgrade_recommendations.is_empty() {
+                    println!();
+                    println!(
+                        "Upgrade recommendations: {}",
+                        vulnerability_report.upgrade_recommendations.len()
+                    );
+                    print_upgrade_recommendations_table(
+                        &vulnerability_report.upgrade_recommendations,
                     );
                 }
 
@@ -159,6 +172,7 @@ async fn main() {
                     lookup_error,
                     dependencies,
                     vulnerabilities: vulnerability_report.vulnerabilities,
+                    upgrade_recommendations: vulnerability_report.upgrade_recommendations,
                 };
 
                 if let Err(error) = emit_raw_output(&payload, raw_json, &raw_json_out) {
@@ -238,6 +252,33 @@ fn print_vulnerability_table(vulnerabilities: &[scanr_core::Vulnerability]) {
             truncate_cell(&vulnerability.affected_version, 14),
             truncate_cell(&package, 18),
             truncate_cell(&fix_hint, 46),
+        );
+    }
+}
+
+fn print_upgrade_recommendations_table(recommendations: &[scanr_core::UpgradeRecommendation]) {
+    let header = format!(
+        "{:<4} {:<18} {:<8} {:<14} {:<14} {}",
+        "#", "PACKAGE", "ECO", "CURRENT", "SUGGESTED", "STATUS"
+    );
+    println!("{header}");
+    println!("{}", "-".repeat(header.len()));
+
+    for (index, recommendation) in recommendations.iter().enumerate() {
+        let status = if recommendation.major_bump {
+            "safe (major upgrade)"
+        } else {
+            "safe"
+        };
+
+        println!(
+            "{:<4} {:<18} {:<8} {:<14} {:<14} {}",
+            index + 1,
+            truncate_cell(&recommendation.package_name, 18),
+            truncate_cell(&recommendation.ecosystem.to_string(), 8),
+            truncate_cell(&recommendation.current_version, 14),
+            truncate_cell(&recommendation.suggested_version, 14),
+            status,
         );
     }
 }
