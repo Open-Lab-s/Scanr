@@ -1,6 +1,6 @@
 {
   "name": "@openlabs/scanr_cli",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Scanr CLI distribution package",
   "homepage": "https://github.com/Open-Lab-s/Scanr",
   "repository": {
