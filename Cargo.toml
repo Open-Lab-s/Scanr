@@ -2,6 +2,6 @@
 members = [
     "crates/scanr-core",
     "crates/scanr-cli",
+    "crates/scanr-engine",
 ]
 resolver = "2"
-
