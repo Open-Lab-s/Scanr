@@ -17,6 +17,7 @@ use toml::Value as TomlValue;
 
 mod baseline;
 mod cache;
+mod trace;
 
 pub use baseline::{
     BASELINE_RELATIVE_PATH, Baseline, BaselineDelta, BaselineEntry, baseline_path_for_target,
@@ -24,6 +25,7 @@ pub use baseline::{
     load_baseline_for_target, save_baseline_for_target,
 };
 use cache::{CacheDataState, CacheGetResult, CacheManager};
+pub use trace::{TraceMatch, TraceReport, trace_dependency_paths};
 
 const OSV_QUERY_URL: &str = "https://api.osv.dev/v1/query";
 const OSV_CONCURRENCY_LIMIT: usize = 8;
