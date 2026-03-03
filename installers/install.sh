@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-REPO="${SCANR_REPO:-scanr-dev/scanr}"
+REPO="${SCANR_REPO:-Open-Lab-s/Scanr}"
 VERSION="${SCANR_VERSION:-latest}"
 INSTALL_DIR="${SCANR_INSTALL_DIR:-$HOME/.local/bin}"
 

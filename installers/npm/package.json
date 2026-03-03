@@ -1,20 +1,23 @@
 {
-  "name": "scanr",
+  "name": "@openlabs/scanr_cli",
   "version": "0.1.0",
   "description": "Scanr CLI distribution package",
-  "homepage": "https://github.com/scanr-dev/scanr",
+  "homepage": "https://github.com/Open-Lab-s/Scanr",
   "repository": {
     "type": "git",
-    "url": "https://github.com/scanr-dev/scanr.git"
+    "url": "git+https://github.com/Open-Lab-s/Scanr.git"
   },
   "license": "Apache-2.0",
   "preferGlobal": true,
   "type": "commonjs",
   "bin": {
-    "scanr": "./bin/scanr.js"
+    "scanr": "bin/scanr.js"
   },
   "scripts": {
     "postinstall": "node ./scripts/install.js"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "files": [
     "bin",

@@ -20,6 +20,7 @@ Scanr supports these distribution channels:
 ## Notes
 
 - npm/bun wrapper expects published prebuilt release binaries.
+- npm package name: `@openlabs/scanr_cli`.
 - curl installer expects published prebuilt release binaries.
 - brew and paru files require checksum updates for each release.
 
@@ -30,3 +31,7 @@ Expected release asset names:
 - `scanr-x86_64-apple-darwin`
 - `scanr-aarch64-apple-darwin`
 - `scanr-x86_64-pc-windows-msvc.exe`
+
+Default release repository used by installers:
+
+- `https://github.com/Open-Lab-s/Scanr`

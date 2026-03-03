@@ -38,16 +38,16 @@ Installer scaffolding lives under [`installers/`](installers).
 cargo install --path crates/scanr-cli
 
 # npm
-npm install -g scanr
+npm install -g @openlabs/scanr_cli
 
 # bun (same npm wrapper)
-bun install -g scanr
+bun install -g @openlabs/scanr_cli
 
 # curl installer
 curl -fsSL https://scanr.dev/install.sh | bash
 
 # brew
-brew install scanr
+brew install Open-Lab-s/tap/scanr
 
 # paru via AUR
 paru -S scanr

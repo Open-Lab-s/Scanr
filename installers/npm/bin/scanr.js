@@ -12,7 +12,7 @@ const binPath = join(__dirname, "..", "vendor", binaryName());
 
 if (!existsSync(binPath)) {
   console.error("Scanr binary was not found.");
-  console.error("Reinstall package: npm install -g scanr");
+  console.error("Reinstall package: npm install -g @openlabs/scanr_cli");
   process.exit(1);
 }
 
