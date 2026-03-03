@@ -298,7 +298,7 @@ fn handle_key(app: &mut AppState, key: KeyEvent) {
 }
 
 fn render(frame: &mut Frame, app: &AppState) {
-    let root = frame.size();
+    let root = frame.area();
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(4), Constraint::Min(0)])
@@ -668,7 +668,7 @@ fn render_recommendations(frame: &mut Frame, app: &AppState, area: Rect) {
 }
 
 fn render_popup(frame: &mut Frame, app: &AppState) {
-    let popup = centered_rect(80, 70, frame.size());
+    let popup = centered_rect(80, 70, frame.area());
     frame.render_widget(Clear, popup);
     let details = Paragraph::new(detail_text(app))
         .block(

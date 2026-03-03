@@ -69,6 +69,52 @@ pub struct ScanResult {
     pub metadata: ScanMetadata,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SeverityCounts {
+    pub critical: usize,
+    pub high: usize,
+    pub medium: usize,
+    pub low: usize,
+    pub unknown: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum RiskLevel {
+    Low,
+    Moderate,
+    High,
+}
+
+impl Display for RiskLevel {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Low => write!(f, "LOW"),
+            Self::Moderate => write!(f, "MODERATE"),
+            Self::High => write!(f, "HIGH"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FindingSummary {
+    pub total: usize,
+    pub counts: SeverityCounts,
+    pub risk_level: RiskLevel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VulnerabilityPolicy {
+    pub max_critical: usize,
+    pub max_high: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyEvaluation {
+    pub passed: bool,
+    pub violations: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineError {
     pub message: String,
@@ -96,4 +142,67 @@ pub trait ScanEngine {
     fn name(&self) -> &'static str;
 
     fn scan(&self, input: ScanInput) -> EngineResult<ScanResult>;
+}
+
+pub fn summarize_findings(findings: &[Finding]) -> FindingSummary {
+    let mut counts = SeverityCounts::default();
+    for finding in findings {
+        match finding.severity {
+            Severity::Critical => counts.critical += 1,
+            Severity::High => counts.high += 1,
+            Severity::Medium => counts.medium += 1,
+            Severity::Low => counts.low += 1,
+            Severity::Unknown => counts.unknown += 1,
+        }
+    }
+
+    let risk_level = if counts.critical > 0 || counts.high > 0 {
+        RiskLevel::High
+    } else if counts.medium > 0 || counts.unknown > 0 {
+        RiskLevel::Moderate
+    } else {
+        RiskLevel::Low
+    };
+
+    FindingSummary {
+        total: findings.len(),
+        counts,
+        risk_level,
+    }
+}
+
+pub fn evaluate_vulnerability_policy(
+    findings: &[Finding],
+    policy: &VulnerabilityPolicy,
+) -> PolicyEvaluation {
+    let summary = summarize_findings(findings);
+    let mut violations = Vec::new();
+
+    if summary.counts.critical > policy.max_critical {
+        violations.push(format!(
+            "critical vulnerabilities {} exceed max_critical {}",
+            summary.counts.critical, policy.max_critical
+        ));
+    }
+
+    if summary.counts.high > policy.max_high {
+        violations.push(format!(
+            "high vulnerabilities {} exceed max_high {}",
+            summary.counts.high, policy.max_high
+        ));
+    }
+
+    PolicyEvaluation {
+        passed: violations.is_empty(),
+        violations,
+    }
+}
+
+pub fn resolve_exit_code(vulnerability_failed: bool, license_failed: bool) -> i32 {
+    match (vulnerability_failed, license_failed) {
+        (false, false) => 0,
+        (true, false) => 2,
+        (false, true) => 3,
+        (true, true) => 4,
+    }
 }

@@ -126,7 +126,7 @@ struct ScanRawOutput {
     risk_summary: scanr_sca::RiskSummary,
     policy_path: Option<String>,
     policy: Option<scanr_sca::PolicyConfig>,
-    policy_evaluation: Option<scanr_sca::PolicyEvaluation>,
+    policy_evaluation: Option<scanr_engine::PolicyEvaluation>,
     license_policy: scanr_sca::LicensePolicy,
     license_evaluation: scanr_sca::LicenseEvaluationResult,
     baseline: Option<BaselineSummaryOutput>,
@@ -456,9 +456,15 @@ async fn main() {
                                 loaded_policy.max_critical, loaded_policy.max_high
                             );
 
-                            let risk_summary = risk_summary_from_scan_result(&scan_result);
-                            let evaluation =
-                                scanr_sca::evaluate_policy(&risk_summary, &loaded_policy);
+                            let findings = scanr_sca::findings_from_scan_result(&scan_result);
+                            let policy_input = scanr_engine::VulnerabilityPolicy {
+                                max_critical: loaded_policy.max_critical,
+                                max_high: loaded_policy.max_high,
+                            };
+                            let evaluation = scanr_engine::evaluate_vulnerability_policy(
+                                &findings,
+                                &policy_input,
+                            );
                             if evaluation.passed {
                                 println!("Result: PASS");
                             } else {
@@ -493,12 +499,7 @@ async fn main() {
             }
 
             let final_ci_exit_code = if ci {
-                match (vulnerability_failed_in_ci, license_failed_in_ci) {
-                    (false, false) => 0,
-                    (true, false) => 2,
-                    (false, true) => 3,
-                    (true, true) => 4,
-                }
+                scanr_engine::resolve_exit_code(vulnerability_failed_in_ci, license_failed_in_ci)
             } else {
                 0
             };

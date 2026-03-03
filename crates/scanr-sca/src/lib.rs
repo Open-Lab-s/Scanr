@@ -762,19 +762,7 @@ pub async fn scan_path_with_options(
 }
 
 fn convert_to_engine_scan_result(scan_result: &ScanResult) -> EngineScanResult {
-    let findings = scan_result
-        .vulnerabilities
-        .iter()
-        .map(|vulnerability| Finding {
-            id: vulnerability.cve_id.clone(),
-            engine: EngineType::SCA,
-            severity: vulnerability.severity,
-            title: short_message_from_description(&vulnerability.description),
-            description: vulnerability.description.clone(),
-            location: Some(scan_result.path.clone()),
-            remediation: vulnerability.remediation.clone(),
-        })
-        .collect::<Vec<_>>();
+    let findings = findings_from_scan_result(scan_result);
 
     EngineScanResult {
         findings,
@@ -786,6 +774,22 @@ fn convert_to_engine_scan_result(scan_result: &ScanResult) -> EngineScanResult {
             total_vulnerabilities: scan_result.vulnerabilities.len(),
         },
     }
+}
+
+pub fn findings_from_scan_result(scan_result: &ScanResult) -> Vec<Finding> {
+    scan_result
+        .vulnerabilities
+        .iter()
+        .map(|vulnerability| Finding {
+            id: vulnerability.cve_id.clone(),
+            engine: EngineType::SCA,
+            severity: vulnerability.severity,
+            title: short_message_from_description(&vulnerability.description),
+            description: vulnerability.description.clone(),
+            location: Some(scan_result.path.clone()),
+            remediation: vulnerability.remediation.clone(),
+        })
+        .collect()
 }
 
 pub fn scan_result_to_sarif(scan_result: &ScanResult) -> SarifReport {
