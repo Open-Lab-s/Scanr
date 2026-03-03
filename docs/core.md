@@ -8,6 +8,7 @@
 - Query OSV and normalize vulnerability records
 - Generate upgrade recommendations
 - Summarize risk and evaluate CI policy
+- Save/load baseline snapshots and compute deterministic deltas
 - Generate and diff CycloneDX SBOM documents
 - Convert scan results to SARIF
 
@@ -51,6 +52,9 @@ pub struct ScanResult {
 
 - `scan_dependencies(path)`
 - `scan_path(path)`
+- `save_baseline_for_target(path, scan_result)`
+- `load_baseline_for_target(path)`
+- `compare_scan_result_to_baseline(scan_result, baseline)`
 - `investigate_vulnerabilities(dependencies)`
 - `summarize_risk(vulnerabilities)`
 - `evaluate_policy(summary, policy)`

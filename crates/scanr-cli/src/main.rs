@@ -38,6 +38,9 @@ enum Commands {
         /// Write raw JSON payload to a file.
         #[arg(long, value_name = "FILE", conflicts_with_all = ["json", "sarif"])]
         raw_json_out: Option<PathBuf>,
+        /// Compare current findings against .scanr/baseline.json.
+        #[arg(long, conflicts_with_all = ["json", "sarif"])]
+        baseline: bool,
         /// Recursively scan subdirectories for supported manifest files.
         #[arg(short, long)]
         recursive: bool,
@@ -46,6 +49,11 @@ enum Commands {
     Sbom {
         #[command(subcommand)]
         command: SbomCommands,
+    },
+    /// Baseline operations.
+    Baseline {
+        #[command(subcommand)]
+        command: BaselineCommands,
     },
 }
 
@@ -74,6 +82,22 @@ enum SbomCommands {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum BaselineCommands {
+    /// Save baseline snapshot to .scanr/baseline.json.
+    Save {
+        /// Target path to scan for baseline creation.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Show baseline delta compared with current scan.
+    Status {
+        /// Target path to compare with baseline.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+}
+
 #[derive(Debug, Serialize)]
 struct ScanRawOutput {
     target: String,
@@ -87,9 +111,25 @@ struct ScanRawOutput {
     policy_path: Option<String>,
     policy: Option<scanr_core::PolicyConfig>,
     policy_evaluation: Option<scanr_core::PolicyEvaluation>,
+    baseline: Option<BaselineSummaryOutput>,
     dependencies: Vec<scanr_core::Dependency>,
     vulnerabilities: Vec<scanr_core::Vulnerability>,
     upgrade_recommendations: Vec<scanr_core::UpgradeRecommendation>,
+}
+
+#[derive(Debug, Serialize)]
+struct BaselineSummaryOutput {
+    enabled: bool,
+    found: bool,
+    path: String,
+    baseline_version: Option<String>,
+    current_scanr_version: String,
+    version_mismatch: bool,
+    baseline_vulnerabilities: usize,
+    current_vulnerabilities: usize,
+    new_vulnerabilities: usize,
+    fixed_vulnerabilities: usize,
+    new_severity: scanr_core::SeverityCounts,
 }
 
 #[tokio::main]
@@ -111,6 +151,7 @@ async fn main() {
             list_deps,
             raw_json,
             raw_json_out,
+            baseline,
             recursive: _,
         }) => {
             let scan_result = match scanr_core::scan_path(&path).await {
@@ -215,55 +256,168 @@ async fn main() {
             let mut policy_path_display = None;
             let mut policy = None;
             let mut policy_evaluation = None;
+            let mut baseline_summary = None;
+            let mut baseline_delta = None;
+
+            if baseline {
+                let baseline_path = scanr_core::baseline_path_for_target(&path);
+                let baseline_path_display =
+                    normalize_windows_verbatim_path(baseline_path.display().to_string());
+                match scanr_core::load_baseline_for_target(&path) {
+                    Ok(Some((loaded_baseline, loaded_baseline_path))) => {
+                        let delta = scanr_core::compare_scan_result_to_baseline(
+                            &scan_result,
+                            &loaded_baseline,
+                        );
+                        let loaded_path_display = normalize_windows_verbatim_path(
+                            loaded_baseline_path.display().to_string(),
+                        );
+                        let version_mismatch =
+                            loaded_baseline.version != scanr_core::current_scanr_version();
+
+                        println!();
+                        println!("Baseline Comparison");
+                        println!("Baseline file: {}", loaded_path_display);
+                        if version_mismatch {
+                            eprintln!(
+                                "Warning: baseline version '{}' differs from current Scanr '{}'.",
+                                loaded_baseline.version,
+                                scanr_core::current_scanr_version()
+                            );
+                        }
+                        println!("Baseline: {} vulnerabilities", delta.baseline_total);
+                        println!("Current: {} vulnerabilities", delta.current_total);
+                        println!();
+                        println!("New: {}", delta.new_vulnerabilities.len());
+                        println!("Fixed: {}", delta.fixed_vulnerabilities.len());
+                        println!();
+                        println!(
+                            "Security debt delta: +{} new, -{} fixed",
+                            delta.new_vulnerabilities.len(),
+                            delta.fixed_vulnerabilities.len()
+                        );
+                        println!(
+                            "Risk change: +{} CRITICAL, +{} HIGH, +{} MEDIUM, +{} LOW, +{} UNKNOWN",
+                            delta.new_severity.critical,
+                            delta.new_severity.high,
+                            delta.new_severity.medium,
+                            delta.new_severity.low,
+                            delta.new_severity.unknown
+                        );
+
+                        baseline_summary = Some(BaselineSummaryOutput {
+                            enabled: true,
+                            found: true,
+                            path: loaded_path_display,
+                            baseline_version: Some(loaded_baseline.version.clone()),
+                            current_scanr_version: scanr_core::current_scanr_version().to_string(),
+                            version_mismatch,
+                            baseline_vulnerabilities: delta.baseline_total,
+                            current_vulnerabilities: delta.current_total,
+                            new_vulnerabilities: delta.new_vulnerabilities.len(),
+                            fixed_vulnerabilities: delta.fixed_vulnerabilities.len(),
+                            new_severity: delta.new_severity,
+                        });
+                        baseline_delta = Some(delta);
+                    }
+                    Ok(None) => {
+                        println!();
+                        eprintln!(
+                            "Warning: baseline file not found at '{}'. Continuing without baseline comparison.",
+                            baseline_path_display
+                        );
+
+                        baseline_summary = Some(BaselineSummaryOutput {
+                            enabled: true,
+                            found: false,
+                            path: baseline_path_display,
+                            baseline_version: None,
+                            current_scanr_version: scanr_core::current_scanr_version().to_string(),
+                            version_mismatch: false,
+                            baseline_vulnerabilities: 0,
+                            current_vulnerabilities: 0,
+                            new_vulnerabilities: 0,
+                            fixed_vulnerabilities: 0,
+                            new_severity: scanr_core::SeverityCounts::default(),
+                        });
+                    }
+                    Err(error) => {
+                        eprintln!("Failed to load baseline: {error}");
+                        process::exit(2);
+                    }
+                }
+            }
 
             if ci {
                 println!();
-                println!("CI Policy Check");
-                match scanr_core::load_policy_for_target(&path) {
-                    Ok((loaded_policy, loaded_policy_path)) => {
-                        if let Some(policy_path) = loaded_policy_path {
-                            let normalized =
-                                normalize_windows_verbatim_path(policy_path.display().to_string());
-                            println!("Policy file: {normalized}");
-                            policy_path_display = Some(normalized);
-                        } else {
+                if let Some(delta) = baseline_delta.as_ref() {
+                    println!("CI Baseline Check");
+                    if delta.new_vulnerabilities.is_empty() {
+                        println!("Result: PASS");
+                        if !delta.fixed_vulnerabilities.is_empty() {
                             println!(
-                                "Policy file: not found (using defaults max_critical=0, max_high=0)"
+                                "Improvement: {} vulnerabilities fixed since baseline.",
+                                delta.fixed_vulnerabilities.len()
                             );
                         }
+                    } else {
+                        println!("Result: FAIL");
                         println!(
-                            "Rules: max_critical={} | max_high={}",
-                            loaded_policy.max_critical, loaded_policy.max_high
+                            "- new vulnerabilities detected: {}",
+                            delta.new_vulnerabilities.len()
                         );
-
-                        let risk_summary = risk_summary_from_scan_result(&scan_result);
-                        let evaluation = scanr_core::evaluate_policy(&risk_summary, &loaded_policy);
-                        if evaluation.passed {
-                            println!("Result: PASS");
-                        } else {
-                            println!("Result: FAIL");
-                            println!("Violations:");
-                            for violation in &evaluation.violations {
-                                println!("- {violation}");
+                        ci_exit_code = 2;
+                    }
+                } else {
+                    println!("CI Policy Check");
+                    match scanr_core::load_policy_for_target(&path) {
+                        Ok((loaded_policy, loaded_policy_path)) => {
+                            if let Some(policy_path) = loaded_policy_path {
+                                let normalized = normalize_windows_verbatim_path(
+                                    policy_path.display().to_string(),
+                                );
+                                println!("Policy file: {normalized}");
+                                policy_path_display = Some(normalized);
+                            } else {
+                                println!(
+                                    "Policy file: not found (using defaults max_critical=0, max_high=0)"
+                                );
                             }
-                            ci_exit_code = 2;
-                        }
-
-                        if scan_result.lookup_error.is_some() || scan_result.failed_queries > 0 {
-                            println!("Result: FAIL");
                             println!(
-                                "- vulnerability lookup incomplete; CI mode requires complete OSV results"
+                                "Rules: max_critical={} | max_high={}",
+                                loaded_policy.max_critical, loaded_policy.max_high
                             );
-                            ci_exit_code = 3;
-                        }
 
-                        policy = Some(loaded_policy);
-                        policy_evaluation = Some(evaluation);
+                            let risk_summary = risk_summary_from_scan_result(&scan_result);
+                            let evaluation =
+                                scanr_core::evaluate_policy(&risk_summary, &loaded_policy);
+                            if evaluation.passed {
+                                println!("Result: PASS");
+                            } else {
+                                println!("Result: FAIL");
+                                println!("Violations:");
+                                for violation in &evaluation.violations {
+                                    println!("- {violation}");
+                                }
+                                ci_exit_code = 2;
+                            }
+
+                            policy = Some(loaded_policy);
+                            policy_evaluation = Some(evaluation);
+                        }
+                        Err(error) => {
+                            eprintln!("Failed to load policy: {error}");
+                            process::exit(2);
+                        }
                     }
-                    Err(error) => {
-                        eprintln!("Failed to load policy: {error}");
-                        process::exit(2);
-                    }
+                }
+
+                if scan_result.lookup_error.is_some() || scan_result.failed_queries > 0 {
+                    println!("Result: FAIL");
+                    println!(
+                        "- vulnerability lookup incomplete; CI mode requires complete OSV results"
+                    );
+                    ci_exit_code = 3;
                 }
             }
 
@@ -279,6 +433,7 @@ async fn main() {
                 policy_path: policy_path_display,
                 policy,
                 policy_evaluation,
+                baseline: baseline_summary,
                 dependencies: scan_result.dependencies.clone(),
                 vulnerabilities: scan_result.vulnerabilities.clone(),
                 upgrade_recommendations: scan_result.upgrade_recommendations.clone(),
@@ -386,6 +541,113 @@ async fn main() {
                         eprintln!("SBOM diff failed: {error}");
                         process::exit(1);
                     }
+                }
+            }
+        },
+        Some(Commands::Baseline { command }) => match command {
+            BaselineCommands::Save { path } => {
+                let scan_result = match scanr_core::scan_path(&path).await {
+                    Ok(scan_result) => scan_result,
+                    Err(error) => {
+                        eprintln!("Scan failed: {error}");
+                        process::exit(1);
+                    }
+                };
+
+                if scan_result.lookup_error.is_some() || scan_result.failed_queries > 0 {
+                    eprintln!(
+                        "Baseline save failed: vulnerability lookup incomplete. Run again when OSV is reachable."
+                    );
+                    process::exit(1);
+                }
+
+                let baseline = scanr_core::build_baseline_from_scan_result(&scan_result);
+                let baseline_path = match scanr_core::save_baseline_for_target(&path, &scan_result)
+                {
+                    Ok(path) => path,
+                    Err(error) => {
+                        eprintln!("Failed to save baseline: {error}");
+                        process::exit(1);
+                    }
+                };
+
+                println!("Baseline saved");
+                println!(
+                    "Path: {}",
+                    normalize_windows_verbatim_path(baseline_path.display().to_string())
+                );
+                println!("Entries: {}", baseline.vulnerabilities.len());
+                println!("Generated at: {}", baseline.generated_at);
+                println!("Scanr version: {}", baseline.version);
+            }
+            BaselineCommands::Status { path } => {
+                let (baseline, baseline_path) = match scanr_core::load_baseline_for_target(&path) {
+                    Ok(Some(payload)) => payload,
+                    Ok(None) => {
+                        let expected = scanr_core::baseline_path_for_target(&path);
+                        eprintln!(
+                            "Baseline not found at '{}'. Run `scanr baseline save` first.",
+                            normalize_windows_verbatim_path(expected.display().to_string())
+                        );
+                        process::exit(1);
+                    }
+                    Err(error) => {
+                        eprintln!("Failed to load baseline: {error}");
+                        process::exit(1);
+                    }
+                };
+
+                let scan_result = match scanr_core::scan_path(&path).await {
+                    Ok(scan_result) => scan_result,
+                    Err(error) => {
+                        eprintln!("Scan failed: {error}");
+                        process::exit(1);
+                    }
+                };
+                let delta = scanr_core::compare_scan_result_to_baseline(&scan_result, &baseline);
+
+                println!("Baseline Status");
+                println!(
+                    "Baseline file: {}",
+                    normalize_windows_verbatim_path(baseline_path.display().to_string())
+                );
+                println!("Baseline version: {}", baseline.version);
+                println!(
+                    "Current Scanr version: {}",
+                    scanr_core::current_scanr_version()
+                );
+                if baseline.version != scanr_core::current_scanr_version() {
+                    eprintln!(
+                        "Warning: baseline version '{}' differs from current Scanr '{}'.",
+                        baseline.version,
+                        scanr_core::current_scanr_version()
+                    );
+                }
+                println!();
+                println!("Baseline: {} vulnerabilities", delta.baseline_total);
+                println!("Current: {} vulnerabilities", delta.current_total);
+                println!();
+                println!("New: {}", delta.new_vulnerabilities.len());
+                println!("Fixed: {}", delta.fixed_vulnerabilities.len());
+                println!();
+                println!(
+                    "Security debt delta: +{} new, -{} fixed",
+                    delta.new_vulnerabilities.len(),
+                    delta.fixed_vulnerabilities.len()
+                );
+                println!(
+                    "Risk change: +{} CRITICAL, +{} HIGH, +{} MEDIUM, +{} LOW, +{} UNKNOWN",
+                    delta.new_severity.critical,
+                    delta.new_severity.high,
+                    delta.new_severity.medium,
+                    delta.new_severity.low,
+                    delta.new_severity.unknown
+                );
+
+                if scan_result.lookup_error.is_some() || scan_result.failed_queries > 0 {
+                    eprintln!(
+                        "Warning: current scan lookup incomplete; baseline status may be incomplete."
+                    );
                 }
             }
         },

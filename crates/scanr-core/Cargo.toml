@@ -19,3 +19,4 @@ serde_json = "1.0"
 tokio = { version = "1.43", features = ["time"] }
 toml = "0.8"
 walkdir = "2.5"
+time = { version = "0.3", features = ["formatting"] }

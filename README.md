@@ -14,6 +14,7 @@ It is split into:
 - Produces remediation suggestions and upgrade recommendations
 - Classifies risk (LOW / MODERATE / HIGH) with severity counters
 - Enforces CI policy from `scanr.toml`
+- Supports vulnerability baseline and security debt delta tracking
 - Exports CycloneDX SBOM and computes SBOM diffs
 - Emits machine-readable JSON and SARIF
 - Provides a full-screen interactive terminal UI
@@ -44,6 +45,9 @@ scanr scan .
 scanr scan . --ci
 scanr scan . --json
 scanr scan . --sarif
+scanr scan . --baseline
+scanr baseline save
+scanr baseline status
 scanr sbom generate
 scanr sbom diff old.cdx.json new.cdx.json
 ```
@@ -64,6 +68,7 @@ scanr
   - [`docs/installation.md`](docs/installation.md)
   - [`docs/output-formats.md`](docs/output-formats.md)
   - [`docs/ci-policy.md`](docs/ci-policy.md)
+  - [`docs/baseline.md`](docs/baseline.md)
   - [`docs/sbom.md`](docs/sbom.md)
   - [`docs/tui.md`](docs/tui.md)
 

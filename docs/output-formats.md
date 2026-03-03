@@ -97,5 +97,6 @@ Behavior:
   - `policy_path`
   - `policy`
   - `policy_evaluation`
+  - `baseline` summary (when `--baseline` is used)
   - query statistics and lookup status
 - Useful for GUI frontends (for example, Tauri) and custom reporting workflows

@@ -7,6 +7,8 @@
 ```bash
 scanr
 scanr scan <path> [options]
+scanr baseline save [path]
+scanr baseline status [path]
 scanr sbom generate [path] [-o <file>]
 scanr sbom diff <old.json> <new.json>
 ```
@@ -29,6 +31,7 @@ Flags:
 - `--list-deps`: print parsed dependency list before vulnerability summary
 - `--raw-json`: print extended raw payload after human-readable output
 - `--raw-json-out <FILE>`: write extended raw payload to file
+- `--baseline`: compare current findings to `.scanr/baseline.json`
 - `-r, --recursive`: accepted CLI flag (reserved for recursive manifest discovery)
 
 Mutual exclusions:
@@ -56,6 +59,32 @@ Compares two CycloneDX JSON SBOM files and prints:
 
 ```bash
 scanr sbom diff old.cdx.json new.cdx.json
+```
+
+### `scanr baseline save`
+
+Runs a full scan and writes a deterministic vulnerability snapshot to:
+
+- `.scanr/baseline.json`
+
+```bash
+scanr baseline save
+scanr baseline save .
+```
+
+### `scanr baseline status`
+
+Loads `.scanr/baseline.json`, runs current scan, and prints:
+
+- baseline vulnerability count
+- current vulnerability count
+- new vulnerabilities (`current - baseline`)
+- fixed vulnerabilities (`baseline - current`)
+- security debt/risk delta summary
+
+```bash
+scanr baseline status
+scanr baseline status .
 ```
 
 ## CLI Output Example
