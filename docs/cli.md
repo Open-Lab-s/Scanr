@@ -9,6 +9,7 @@ scanr
 scanr scan <path> [options]
 scanr baseline save [path]
 scanr baseline status [path]
+scanr trace <package> [path]
 scanr sbom generate [path] [-o <file>]
 scanr sbom diff <old.json> <new.json>
 ```
@@ -89,6 +90,27 @@ Loads `.scanr/baseline.json`, runs current scan, and prints:
 scanr baseline status
 scanr baseline status .
 ```
+
+### `scanr trace <package>`
+
+Traces root-to-target dependency paths for Node projects using `package-lock.json`.
+
+```bash
+scanr trace minimatch
+scanr trace minimatch .
+```
+
+Behavior:
+
+- Builds a temporary in-memory graph only for trace command execution
+- Finds matching package versions by name
+- Prints one or more root-to-target paths
+- Prints vulnerability context (severity/CVE/fix) when available
+
+Current scope:
+
+- Supported: Node lockfile tracing
+- Not supported: Python and non-lockfile graph sources
 
 ## CLI Output Example
 

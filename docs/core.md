@@ -10,6 +10,7 @@
 - Generate upgrade recommendations
 - Summarize risk and evaluate CI policy
 - Save/load baseline snapshots and compute deterministic deltas
+- Build temporary Node dependency graphs for path tracing
 - Generate and diff CycloneDX SBOM documents
 - Convert scan results to SARIF
 
@@ -56,6 +57,7 @@ pub struct ScanResult {
 - `scan_dependencies(path)`
 - `scan_path(path)`
 - `scan_path_with_options(path, options)`
+- `trace_dependency_paths(path, package_name)`
 - `save_baseline_for_target(path, scan_result)`
 - `load_baseline_for_target(path)`
 - `compare_scan_result_to_baseline(scan_result, baseline)`

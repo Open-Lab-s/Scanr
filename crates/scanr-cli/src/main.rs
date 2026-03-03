@@ -61,6 +61,14 @@ enum Commands {
         #[command(subcommand)]
         command: BaselineCommands,
     },
+    /// Trace dependency paths for a package (Node package-lock only).
+    Trace {
+        /// Package name to trace (for example: minimatch).
+        package: String,
+        /// Project path containing package-lock.json.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -725,6 +733,96 @@ async fn main() {
                 }
             }
         },
+        Some(Commands::Trace { package, path }) => {
+            let report = match scanr_core::trace_dependency_paths(&path, &package) {
+                Ok(report) => report,
+                Err(error) => {
+                    eprintln!("Trace failed: {error}");
+                    process::exit(1);
+                }
+            };
+
+            if report.matches.is_empty() {
+                println!(
+                    "Package '{}' not found in dependency graph.",
+                    report.target_package
+                );
+                return;
+            }
+
+            let loaded_policy = scanr_core::load_policy_for_target(&path);
+            let (cache_enabled, cache_ttl_hours) = match &loaded_policy {
+                Ok((policy, _)) => (policy.cache_enabled, policy.cache_ttl_hours),
+                Err(_) => (true, 24),
+            };
+            let cache_base_path = if path.is_file() {
+                path.parent()
+                    .map(|parent| {
+                        std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf())
+                    })
+                    .unwrap_or_else(|| PathBuf::from("."))
+            } else {
+                std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone())
+            };
+            let vulnerability_options = scanr_core::VulnerabilityQueryOptions {
+                cache_base_path: Some(cache_base_path),
+                cache_enabled,
+                cache_ttl_hours,
+                offline: false,
+                force_refresh: false,
+            };
+            let trace_dependencies = report
+                .matches
+                .iter()
+                .map(|matched| matched.dependency.clone())
+                .collect::<Vec<_>>();
+            let vulnerability_report =
+                match scanr_core::investigate_vulnerabilities_with_options(
+                    &trace_dependencies,
+                    &vulnerability_options,
+                )
+                .await
+                {
+                    Ok(report) => report,
+                    Err(_) => scanr_core::VulnerabilityReport {
+                        vulnerabilities: Vec::new(),
+                        upgrade_recommendations: Vec::new(),
+                        queried_dependencies: 0,
+                        failed_queries: 0,
+                        offline_missing: 0,
+                        cache_events: Vec::new(),
+                    },
+                };
+
+            if report.matches.len() == 1 {
+                let matched = &report.matches[0];
+                println!("Dependency Path Trace: {}@{}", matched.package, matched.version);
+                print_trace_vulnerability_context(
+                    &matched.package,
+                    &matched.version,
+                    &vulnerability_report,
+                );
+                println!();
+                print_trace_paths(&matched.paths, matched.truncated);
+            } else {
+                println!(
+                    "Dependency Path Trace: {} ({} versions)",
+                    report.target_package,
+                    report.matches.len()
+                );
+                for matched in &report.matches {
+                    println!();
+                    println!("{}@{}", matched.package, matched.version);
+                    print_trace_vulnerability_context(
+                        &matched.package,
+                        &matched.version,
+                        &vulnerability_report,
+                    );
+                    println!();
+                    print_trace_paths(&matched.paths, matched.truncated);
+                }
+            }
+        }
     }
 }
 
@@ -886,6 +984,90 @@ fn score_short(score: &str) -> String {
             .unwrap_or_else(|| score.to_string());
     }
     score.to_string()
+}
+
+fn print_trace_paths(paths: &[Vec<String>], truncated: bool) {
+    if paths.is_empty() {
+        println!("No path from root found.");
+        return;
+    }
+
+    if paths.len() == 1 {
+        println!("Path:");
+        print_single_trace_path(&paths[0]);
+    } else {
+        println!("Found {} paths:", paths.len());
+        for (index, path) in paths.iter().enumerate() {
+            println!();
+            println!("Path {}:", index + 1);
+            print_single_trace_path(path);
+        }
+    }
+
+    if truncated {
+        println!();
+        println!("Note: trace output truncated by safety limits (depth/path count).");
+    }
+}
+
+fn print_single_trace_path(path: &[String]) {
+    println!("root");
+    for (index, node) in path.iter().enumerate() {
+        let indent = "    ".repeat(index);
+        println!("{indent} └─ {node}");
+    }
+}
+
+fn print_trace_vulnerability_context(
+    package: &str,
+    version: &str,
+    vulnerability_report: &scanr_core::VulnerabilityReport,
+) {
+    let vulnerability_matches = vulnerability_report
+        .vulnerabilities
+        .iter()
+        .filter(|vulnerability| {
+            package_name_from_description(&vulnerability.description)
+                .eq_ignore_ascii_case(package)
+                && vulnerability.affected_version == version
+        })
+        .collect::<Vec<_>>();
+    if vulnerability_matches.is_empty() {
+        println!("Severity: none");
+        println!("CVE: none");
+    } else {
+        let highest_severity = vulnerability_matches
+            .iter()
+            .map(|vulnerability| vulnerability.severity)
+            .max_by_key(|severity| match severity {
+                scanr_core::Severity::Critical => 4,
+                scanr_core::Severity::High => 3,
+                scanr_core::Severity::Medium => 2,
+                scanr_core::Severity::Low => 1,
+                scanr_core::Severity::Unknown => 0,
+            })
+            .unwrap_or(scanr_core::Severity::Unknown);
+        println!("Severity: {}", highest_severity.to_string().to_uppercase());
+
+        let mut cves = vulnerability_matches
+            .iter()
+            .map(|vulnerability| vulnerability.cve_id.clone())
+            .collect::<Vec<_>>();
+        cves.sort();
+        cves.dedup();
+        println!("CVE: {}", cves.join(", "));
+    }
+
+    let recommendation = vulnerability_report
+        .upgrade_recommendations
+        .iter()
+        .find(|recommendation| {
+            recommendation.package_name.eq_ignore_ascii_case(package)
+                && recommendation.current_version == version
+        });
+    if let Some(recommendation) = recommendation {
+        println!("Fix: upgrade to {}", recommendation.suggested_version);
+    }
 }
 
 fn truncate_cell(value: &str, max_len: usize) -> String {

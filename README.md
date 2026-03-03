@@ -18,6 +18,7 @@ It is split into:
 - Enforces CI policy from `scanr.toml`
 - Supports vulnerability baseline and security debt delta tracking
 - Exports CycloneDX SBOM and computes SBOM diffs
+- Traces dependency introduction paths (Node package-lock)
 - Emits machine-readable JSON and SARIF
 - Provides a full-screen interactive terminal UI
 
@@ -52,6 +53,7 @@ scanr scan . --refresh
 scanr scan . --baseline
 scanr baseline save
 scanr baseline status
+scanr trace minimatch
 scanr sbom generate
 scanr sbom diff old.cdx.json new.cdx.json
 ```
