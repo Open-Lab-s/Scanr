@@ -32,12 +32,15 @@ Flags:
 - `--raw-json`: print extended raw payload after human-readable output
 - `--raw-json-out <FILE>`: write extended raw payload to file
 - `--baseline`: compare current findings to `.scanr/baseline.json`
+- `--offline`: use only local cache and skip OSV HTTP calls
+- `--refresh`: ignore TTL and force fresh OSV fetch
 - `-r, --recursive`: accepted CLI flag (reserved for recursive manifest discovery)
 
 Mutual exclusions:
 
 - `--json` and `--sarif` cannot be used together
 - `--ci` cannot be combined with `--json` or `--sarif`
+- `--offline` and `--refresh` cannot be used together
 
 ### `scanr sbom generate`
 

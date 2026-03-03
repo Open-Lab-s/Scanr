@@ -94,6 +94,8 @@ Behavior:
 
 - Includes additional CLI context:
   - `ci_mode`
+  - `offline_missing`
+  - `cache_events`
   - `policy_path`
   - `policy`
   - `policy_evaluation`

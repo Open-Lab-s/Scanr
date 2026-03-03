@@ -12,6 +12,8 @@ Scanr is a Rust dependency security scanner with two first-class crates:
   - Python: `requirements.txt`, `pyproject.toml`
   - Rust: `Cargo.toml`, `Cargo.lock`
 - Vulnerability investigation through OSV
+- Project-local OSV caching with TTL
+- Offline mode and forced refresh controls
 - Severity and risk classification
 - Upgrade recommendations (safe version targeting)
 - Baseline save/compare/status for incremental adoption

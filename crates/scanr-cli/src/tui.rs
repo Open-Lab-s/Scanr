@@ -76,7 +76,9 @@ impl AppState {
             risk_level: scanr_core::RiskLevel::Low,
             queried_dependencies: 0,
             failed_queries: 0,
+            offline_missing: 0,
             lookup_error: None,
+            cache_events: Vec::new(),
         };
 
         Self {
