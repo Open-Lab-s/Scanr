@@ -8,6 +8,7 @@ theme:
 
 nav:
   - Home: index.md
+  - Changelog: changelog.md
   - Installation: installation.md
   - Scanr CLI: cli.md
   - TUI Mode: tui.md

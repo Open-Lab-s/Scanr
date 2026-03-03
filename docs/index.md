@@ -51,6 +51,7 @@ F:\Scanr
 ## Documentation Map
 
 - **Installation**: all supported install channels
+- **Changelog**: release history by version
 - **Scanr CLI**: commands, flags, and command output
 - **TUI Mode**: interactive full-screen UI and key bindings
 - **Output Formats**: human, JSON, SARIF, raw JSON

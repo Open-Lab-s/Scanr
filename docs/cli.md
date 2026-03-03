@@ -23,6 +23,7 @@ Starts the full-screen interactive TUI.
 ### `scanr scan <path>`
 
 Runs dependency parsing, OSV vulnerability investigation, risk summary, and upgrade suggestions.
+Also evaluates license compliance and prints license summary/violations.
 
 Flags:
 
@@ -143,7 +144,20 @@ Upgrade recommendations: 2
 Risk Summary
 critical: 0 | high: 1 | medium: 1 | low: 0 | unknown: 0
 risk level: HIGH
+
+License Compliance
+Violations: 1
+- legacy-lib@1.0.0 uses GPL-3.0 (License is blocked)
+Result: WARN (non-blocking)
+
+License Summary:
+Apache-2.0: 50
+MIT: 69
+GPL-3.0: 1
 ```
+
+In CI mode (`--ci`), license violations can fail the build when
+`[license].enforce_in_ci = true` in `scanr.toml`.
 
 ## Help And Version
 

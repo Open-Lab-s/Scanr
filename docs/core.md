@@ -9,6 +9,7 @@
 - Manage project-local OSV cache with TTL/offline controls
 - Generate upgrade recommendations
 - Summarize risk and evaluate CI policy
+- Extract dependency license metadata and evaluate license policy
 - Save/load baseline snapshots and compute deterministic deltas
 - Build temporary Node dependency graphs for path tracing
 - Generate and diff CycloneDX SBOM documents
@@ -65,6 +66,8 @@ pub struct ScanResult {
 - `investigate_vulnerabilities_with_options(dependencies, options)`
 - `summarize_risk(vulnerabilities)`
 - `evaluate_policy(summary, policy)`
+- `extract_licenses(path, dependencies)`
+- `evaluate_licenses(license_info, policy)`
 - `load_policy_for_target(path)`
 - `generate_cyclonedx_sbom(path)`
 - `diff_cyclonedx_sbom_files(old, new)`
