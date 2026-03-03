@@ -1,30 +1,17 @@
 # Scanr Core
 
-`scanr-core` is the shared library crate for Scanr.
+`scanr-core` is the shared security engine crate used by `scanr-cli`.
 
-## Purpose
+## Responsibilities
 
-- Hold reusable security analysis logic
-- Define shared data structures used by the CLI and future services
-- Keep business logic separate from CLI argument parsing
+- Parse dependencies from supported manifest formats
+- Query OSV and normalize vulnerability records
+- Generate upgrade recommendations
+- Summarize risk and evaluate CI policy
+- Generate and diff CycloneDX SBOM documents
+- Convert scan results to SARIF
 
-## Why Separate `scanr-core` From `scanr-cli`
-
-- Cleaner architecture and easier testing
-- Better reuse across binaries and integrations
-- Lower coupling between command UX and analysis engine internals
-
-## Current State (Milestone 2)
-
-`scanr-core` now provides dependency parsing primitives used by `scanr-cli`:
-
-- Node.js: `package.json`, `package-lock.json`
-- Python: `requirements.txt`, `pyproject.toml`, `poetry.lock`
-- Rust: `Cargo.toml`, `Cargo.lock`
-
-The crate returns normalized dependency records with ecosystem and direct/transitive flags.
-
-Core dependency model:
+## Key Data Models
 
 ```rust
 pub struct Dependency {
@@ -33,16 +20,75 @@ pub struct Dependency {
     pub ecosystem: Ecosystem,
     pub direct: bool,
 }
+
+pub struct Vulnerability {
+    pub cve_id: String,
+    pub severity: Severity,
+    pub score: Option<String>,
+    pub affected_version: String,
+    pub description: String,
+    pub references: Vec<String>,
+    pub remediation: Option<String>,
+}
+
+pub struct ScanResult {
+    pub target: String,
+    pub path: String,
+    pub total_dependencies: u32,
+    pub dependencies: Vec<Dependency>,
+    pub vulnerabilities: Vec<Vulnerability>,
+    pub upgrade_recommendations: Vec<UpgradeRecommendation>,
+    pub risk_score: u32,
+    pub severity_summary: SeveritySummary,
+    pub risk_level: RiskLevel,
+    pub queried_dependencies: u32,
+    pub failed_queries: u32,
+    pub lookup_error: Option<String>,
+}
 ```
 
-## Planned Direction
+## Public API Surface
 
-Future milestones should move into this crate:
+- `scan_dependencies(path)`
+- `scan_path(path)`
+- `investigate_vulnerabilities(dependencies)`
+- `summarize_risk(vulnerabilities)`
+- `evaluate_policy(summary, policy)`
+- `load_policy_for_target(path)`
+- `generate_cyclonedx_sbom(path)`
+- `diff_cyclonedx_sbom_files(old, new)`
+- `scan_result_to_sarif(scan_result)`
 
-- Scan orchestration
-- SBOM generation and diff models
-- Vulnerability and policy evaluation primitives
-- Output serialization contracts
+## Supported Ecosystems And Sources
+
+- Node:
+  - `package.json`
+  - `package-lock.json`
+- Python:
+  - `requirements.txt`
+  - `pyproject.toml`
+- Rust:
+  - `Cargo.toml`
+  - `Cargo.lock`
+
+## Vulnerability and Recommendation Engine
+
+- Source: OSV API (`https://api.osv.dev/v1/query`)
+- Async concurrency: `8` parallel dependency lookups
+- Retry strategy: up to `4` retries for retryable failures
+- Upgrade recommendation sources:
+  - npm registry for Node packages
+  - PyPI for Python packages
+  - OSV remediation fallback when registries do not provide a candidate
+
+## Risk Model
+
+- Risk level:
+  - `HIGH` if any critical/high
+  - `MODERATE` if any medium/unknown and no high/critical
+  - `LOW` otherwise
+- Risk score formula:
+  - `critical*100 + high*40 + medium*10 + low*1 + unknown*5`
 
 ## Crate Location
 

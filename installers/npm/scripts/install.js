@@ -81,7 +81,7 @@ async function main() {
   const version = loadVersion();
   const base =
     process.env.SCANR_NPM_DOWNLOAD_BASE ||
-    `https://github.com/scanr-dev/scanr/releases/download/v${version}`;
+    `https://github.com/Open-Lab-s/Scanr/releases/download/v${version}`;
   const url = `${base}/${assetName}`;
   const vendorDir = join(__dirname, "..", "vendor");
   const output = join(vendorDir, binaryName());

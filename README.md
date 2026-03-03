@@ -1,92 +1,87 @@
 # Scanr
-A fully open-source Rust-based DevSecOps security engine that scans dependencies, containers, Infrastructure as Code, and runtime behavior to detect vulnerabilities, license risks, and security misconfigurations directly within developer workflows.
 
-## Workspace
+Scanr is a Rust security scanner focused on dependency intelligence for engineering teams.
 
-This repository is a Rust workspace rooted at `F:\Scanr` with:
+It is split into:
 
-- `crates/scanr-core`: shared core library
-- `crates/scanr-cli`: CLI binary (`scanr`)
+- `scanr-cli`: end-user CLI and TUI (`scanr`)
+- `scanr-core`: reusable scan engine and data models
 
-Build:
+## What Scanr Currently Does
+
+- Parses dependencies from Node, Python, and Rust manifests
+- Queries OSV for known vulnerabilities
+- Produces remediation suggestions and upgrade recommendations
+- Classifies risk (LOW / MODERATE / HIGH) with severity counters
+- Enforces CI policy from `scanr.toml`
+- Exports CycloneDX SBOM and computes SBOM diffs
+- Emits machine-readable JSON and SARIF
+- Provides a full-screen interactive terminal UI
+
+## Install
 
 ```bash
-cargo build --release
+# npm
+npm install -g @openlabs/scanr_cli
+
+# bun (uses npm package)
+bun install -g @openlabs/scanr_cli
+
+# Homebrew
+brew install Open-Lab-s/tap/scanr
+
+# cargo (source install)
+cargo install --path crates/scanr-cli
+
+# curl installer
+curl -fsSL https://scanr.dev/install.sh | bash
 ```
 
-Run TUI:
+## Quick Start
+
+```bash
+scanr scan .
+scanr scan . --ci
+scanr scan . --json
+scanr scan . --sarif
+scanr sbom generate
+scanr sbom diff old.cdx.json new.cdx.json
+```
+
+Launch TUI:
 
 ```bash
 scanr
 ```
 
-## Supported Install Channels
+## Documentation
 
-- `cargo`
-- `npm`
-- `bun` (via npm package)
-- `curl`
-- `brew`
-- `paru`
+- MkDocs source: [`docs/`](docs)
+- Main pages:
+  - [`docs/index.md`](docs/index.md)
+  - [`docs/cli.md`](docs/cli.md)
+  - [`docs/core.md`](docs/core.md)
+  - [`docs/installation.md`](docs/installation.md)
+  - [`docs/output-formats.md`](docs/output-formats.md)
+  - [`docs/ci-policy.md`](docs/ci-policy.md)
+  - [`docs/sbom.md`](docs/sbom.md)
+  - [`docs/tui.md`](docs/tui.md)
 
-Installer scaffolding lives under [`installers/`](installers).
-
-### Install Commands
-
-```bash
-# cargo (source install)
-cargo install --path crates/scanr-cli
-
-# npm
-npm install -g scanr
-
-# bun (same npm wrapper)
-bun install -g scanr
-
-# curl installer
-curl -fsSL https://scanr.dev/install.sh | bash
-
-# brew
-brew install scanr
-
-# paru via AUR
-paru -S scanr
-```
-
-Run commands:
+Run docs locally:
 
 ```bash
-cargo run -p scanr-cli -- scan .
-cargo run -p scanr-cli -- sbom generate
-cargo run -p scanr-cli -- sbom diff old.json new.json
+mkdocs serve
 ```
 
-`scanr scan <path>` supports custom paths and can recursively scan manifest files with `--recursive`.
+## Workspace
 
-## Release Notes for Packagers
-
-- NPM wrapper downloads prebuilt release binaries in `postinstall`.
-- Curl installer downloads the target binary by OS/arch and installs to `~/.local/bin` by default.
-- Homebrew and AUR files are in `installers/homebrew` and `installers/aur`.
-- All scan output modes (`formatted`, `--json`, `--sarif`) are generated from the same core `ScanResult` model.
-
-## Cargo Publish Checklist
-
-```bash
-cargo package --workspace
-cargo publish -p scanr-core
-cargo publish -p scanr-cli
+```text
+F:\Scanr
+├── crates/
+│   ├── scanr-core/
+│   └── scanr-cli/
+├── installers/
+├── docs/
+├── Cargo.toml
+└── mkdocs.yml
 ```
-
-Release flow:
-
-1. Bump crate versions.
-2. Tag release (`vX.Y.Z`).
-3. Publish prebuilt binaries named:
-   - `scanr-x86_64-unknown-linux-gnu`
-   - `scanr-aarch64-unknown-linux-gnu`
-   - `scanr-x86_64-apple-darwin`
-   - `scanr-aarch64-apple-darwin`
-   - `scanr-x86_64-pc-windows-msvc.exe`
-4. Update Homebrew SHA256 values.
-5. Commit and push tag; `.github/workflows/release.yml` publishes release assets and `sha256sums.txt`.

@@ -3,19 +3,18 @@ pkgver=0.1.0
 pkgrel=1
 pkgdesc="DevSecOps security engine CLI"
 arch=("x86_64" "aarch64")
-url="https://github.com/scanr-dev/scanr"
+url="https://github.com/Open-Lab-s/Scanr"
 license=("Apache-2.0")
 depends=("gcc-libs")
-makedepends=("cargo")
-source=("$pkgname-$pkgver.tar.gz::https://github.com/scanr-dev/scanr/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=("SKIP")
-
-build() {
-  cd "$srcdir/$pkgname-$pkgver"
-  cargo build --release --locked --package scanr-cli --bin scanr
-}
+source_x86_64=("scanr-x86_64-unknown-linux-gnu::https://github.com/Open-Lab-s/Scanr/releases/download/v$pkgver/scanr-x86_64-unknown-linux-gnu")
+source_aarch64=("scanr-aarch64-unknown-linux-gnu::https://github.com/Open-Lab-s/Scanr/releases/download/v$pkgver/scanr-aarch64-unknown-linux-gnu")
+sha256sums_x86_64=("29842592118c254edcf4a437b8c4b22bc9e7fc8b47fad8ecdaa878134d57b05f")
+sha256sums_aarch64=("db0f7fc35ae0917d72d8a98f2abb345f56c10ddeac3bb44fd5f5f4d89aa33bcd")
 
 package() {
-  cd "$srcdir/$pkgname-$pkgver"
-  install -Dm755 "target/release/scanr" "$pkgdir/usr/bin/scanr"
+  if [[ "$CARCH" == "x86_64" ]]; then
+    install -Dm755 "$srcdir/scanr-x86_64-unknown-linux-gnu" "$pkgdir/usr/bin/scanr"
+  else
+    install -Dm755 "$srcdir/scanr-aarch64-unknown-linux-gnu" "$pkgdir/usr/bin/scanr"
+  fi
 }

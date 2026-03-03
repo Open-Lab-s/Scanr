@@ -1,0 +1,15 @@
+pkgbase = scanr
+	pkgdesc = DevSecOps security engine CLI
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://github.com/Open-Lab-s/Scanr
+	arch = x86_64
+	arch = aarch64
+	license = Apache-2.0
+	depends = gcc-libs
+	source_x86_64 = scanr-x86_64-unknown-linux-gnu::https://github.com/Open-Lab-s/Scanr/releases/download/v0.1.0/scanr-x86_64-unknown-linux-gnu
+	sha256sums_x86_64 = 29842592118c254edcf4a437b8c4b22bc9e7fc8b47fad8ecdaa878134d57b05f
+	source_aarch64 = scanr-aarch64-unknown-linux-gnu::https://github.com/Open-Lab-s/Scanr/releases/download/v0.1.0/scanr-aarch64-unknown-linux-gnu
+	sha256sums_aarch64 = db0f7fc35ae0917d72d8a98f2abb345f56c10ddeac3bb44fd5f5f4d89aa33bcd
+
+pkgname = scanr
