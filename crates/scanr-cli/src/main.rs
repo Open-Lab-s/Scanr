@@ -127,6 +127,8 @@ struct ScanRawOutput {
     policy_path: Option<String>,
     policy: Option<scanr_core::PolicyConfig>,
     policy_evaluation: Option<scanr_core::PolicyEvaluation>,
+    license_policy: scanr_core::LicensePolicy,
+    license_evaluation: scanr_core::LicenseEvaluationResult,
     baseline: Option<BaselineSummaryOutput>,
     dependencies: Vec<scanr_core::Dependency>,
     vulnerabilities: Vec<scanr_core::Vulnerability>,
@@ -197,6 +199,17 @@ async fn main() {
                     process::exit(1);
                 }
             };
+
+            let effective_policy = loaded_policy
+                .as_ref()
+                .map(|(policy, _)| policy.clone())
+                .unwrap_or_default();
+            let license_info = scanr_core::extract_licenses(&path, &scan_result.dependencies);
+            let license_evaluation =
+                scanr_core::evaluate_licenses(&license_info, &effective_policy.license);
+            let license_failed_in_ci = ci
+                && effective_policy.license.enforce_in_ci
+                && !license_evaluation.violations.is_empty();
 
             if json {
                 match serde_json::to_string_pretty(&scan_result) {
@@ -303,7 +316,7 @@ async fn main() {
                 }
             }
 
-            let mut ci_exit_code = 0i32;
+            let mut vulnerability_failed_in_ci = false;
             let mut policy_path_display = None;
             let mut policy = None;
             let mut policy_evaluation = None;
@@ -394,7 +407,7 @@ async fn main() {
                     }
                     Err(error) => {
                         eprintln!("Failed to load baseline: {error}");
-                        process::exit(2);
+                        process::exit(1);
                     }
                 }
             }
@@ -417,7 +430,7 @@ async fn main() {
                             "- new vulnerabilities detected: {}",
                             delta.new_vulnerabilities.len()
                         );
-                        ci_exit_code = 2;
+                        vulnerability_failed_in_ci = true;
                     }
                 } else {
                     println!("CI Policy Check");
@@ -450,15 +463,15 @@ async fn main() {
                                 for violation in &evaluation.violations {
                                     println!("- {violation}");
                                 }
-                                ci_exit_code = 2;
+                                vulnerability_failed_in_ci = true;
                             }
 
-                            policy = Some(*loaded_policy);
+                            policy = Some(loaded_policy.clone());
                             policy_evaluation = Some(evaluation);
                         }
                         Err(error) => {
                             eprintln!("Failed to load policy: {error}");
-                            process::exit(2);
+                            process::exit(1);
                         }
                     }
                 }
@@ -471,9 +484,27 @@ async fn main() {
                     println!(
                         "- vulnerability lookup incomplete; CI mode requires complete OSV results"
                     );
-                    ci_exit_code = 3;
+                    vulnerability_failed_in_ci = true;
                 }
             }
+
+            let final_ci_exit_code = if ci {
+                match (vulnerability_failed_in_ci, license_failed_in_ci) {
+                    (false, false) => 0,
+                    (true, false) => 2,
+                    (false, true) => 3,
+                    (true, true) => 4,
+                }
+            } else {
+                0
+            };
+
+            print_license_compliance(
+                &license_evaluation,
+                ci,
+                effective_policy.license.enforce_in_ci,
+                final_ci_exit_code,
+            );
 
             let payload = ScanRawOutput {
                 target: scan_result.target.clone(),
@@ -489,6 +520,8 @@ async fn main() {
                 policy_path: policy_path_display,
                 policy,
                 policy_evaluation,
+                license_policy: effective_policy.license.clone(),
+                license_evaluation: license_evaluation.clone(),
                 baseline: baseline_summary,
                 dependencies: scan_result.dependencies.clone(),
                 vulnerabilities: scan_result.vulnerabilities.clone(),
@@ -500,8 +533,8 @@ async fn main() {
                 process::exit(1);
             }
 
-            if ci_exit_code != 0 {
-                process::exit(ci_exit_code);
+            if ci && final_ci_exit_code != 0 {
+                process::exit(final_ci_exit_code);
             }
         }
         Some(Commands::Sbom { command }) => match command {
@@ -776,27 +809,29 @@ async fn main() {
                 .iter()
                 .map(|matched| matched.dependency.clone())
                 .collect::<Vec<_>>();
-            let vulnerability_report =
-                match scanr_core::investigate_vulnerabilities_with_options(
-                    &trace_dependencies,
-                    &vulnerability_options,
-                )
-                .await
-                {
-                    Ok(report) => report,
-                    Err(_) => scanr_core::VulnerabilityReport {
-                        vulnerabilities: Vec::new(),
-                        upgrade_recommendations: Vec::new(),
-                        queried_dependencies: 0,
-                        failed_queries: 0,
-                        offline_missing: 0,
-                        cache_events: Vec::new(),
-                    },
-                };
+            let vulnerability_report = match scanr_core::investigate_vulnerabilities_with_options(
+                &trace_dependencies,
+                &vulnerability_options,
+            )
+            .await
+            {
+                Ok(report) => report,
+                Err(_) => scanr_core::VulnerabilityReport {
+                    vulnerabilities: Vec::new(),
+                    upgrade_recommendations: Vec::new(),
+                    queried_dependencies: 0,
+                    failed_queries: 0,
+                    offline_missing: 0,
+                    cache_events: Vec::new(),
+                },
+            };
 
             if report.matches.len() == 1 {
                 let matched = &report.matches[0];
-                println!("Dependency Path Trace: {}@{}", matched.package, matched.version);
+                println!(
+                    "Dependency Path Trace: {}@{}",
+                    matched.package, matched.version
+                );
                 print_trace_vulnerability_context(
                     &matched.package,
                     &matched.version,
@@ -874,6 +909,56 @@ fn print_risk_summary(scan_result: &scanr_core::ScanResult) {
         scan_result.severity_summary.unknown
     );
     println!("risk level: {}", scan_result.risk_level);
+}
+
+fn print_license_compliance(
+    evaluation: &scanr_core::LicenseEvaluationResult,
+    ci_mode: bool,
+    enforce_in_ci: bool,
+    final_ci_exit_code: i32,
+) {
+    println!();
+    println!("License Compliance");
+    println!("Violations: {}", evaluation.violations.len());
+    for violation in &evaluation.violations {
+        println!(
+            "- {}@{} uses {} ({})",
+            violation.package, violation.version, violation.license, violation.reason
+        );
+    }
+
+    if ci_mode {
+        if enforce_in_ci {
+            if evaluation.violations.is_empty() {
+                println!("CI Result: PASS");
+            } else {
+                println!("CI Result: FAIL");
+            }
+        } else if evaluation.violations.is_empty() {
+            println!("CI Result: PASS (license policy enforcement disabled)");
+        } else {
+            println!("CI Result: WARN (license policy enforcement disabled)");
+        }
+    } else if evaluation.violations.is_empty() {
+        println!("Result: PASS");
+    } else {
+        println!("Result: WARN (non-blocking)");
+    }
+
+    println!();
+    println!("License Summary:");
+    if evaluation.summary.is_empty() {
+        println!("(none)");
+    } else {
+        for (license, count) in &evaluation.summary {
+            println!("{license}: {count}");
+        }
+    }
+
+    if ci_mode {
+        println!();
+        println!("Final CI Exit Code: {final_ci_exit_code}");
+    }
 }
 
 fn print_upgrade_recommendations_table(recommendations: &[scanr_core::UpgradeRecommendation]) {
@@ -1027,8 +1112,7 @@ fn print_trace_vulnerability_context(
         .vulnerabilities
         .iter()
         .filter(|vulnerability| {
-            package_name_from_description(&vulnerability.description)
-                .eq_ignore_ascii_case(package)
+            package_name_from_description(&vulnerability.description).eq_ignore_ascii_case(package)
                 && vulnerability.affected_version == version
         })
         .collect::<Vec<_>>();
@@ -1058,13 +1142,14 @@ fn print_trace_vulnerability_context(
         println!("CVE: {}", cves.join(", "));
     }
 
-    let recommendation = vulnerability_report
-        .upgrade_recommendations
-        .iter()
-        .find(|recommendation| {
-            recommendation.package_name.eq_ignore_ascii_case(package)
-                && recommendation.current_version == version
-        });
+    let recommendation =
+        vulnerability_report
+            .upgrade_recommendations
+            .iter()
+            .find(|recommendation| {
+                recommendation.package_name.eq_ignore_ascii_case(package)
+                    && recommendation.current_version == version
+            });
     if let Some(recommendation) = recommendation {
         println!("Fix: upgrade to {}", recommendation.suggested_version);
     }

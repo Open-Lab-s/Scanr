@@ -17,6 +17,7 @@ use toml::Value as TomlValue;
 
 mod baseline;
 mod cache;
+mod license;
 mod trace;
 
 pub use baseline::{
@@ -25,6 +26,10 @@ pub use baseline::{
     load_baseline_for_target, save_baseline_for_target,
 };
 use cache::{CacheDataState, CacheGetResult, CacheManager};
+pub use license::{
+    LicenseEvaluationResult, LicenseInfo, LicensePolicy, LicenseViolation, evaluate_licenses,
+    extract_licenses,
+};
 pub use trace::{TraceMatch, TraceReport, trace_dependency_paths};
 
 const OSV_QUERY_URL: &str = "https://api.osv.dev/v1/query";
@@ -146,13 +151,14 @@ pub struct RiskSummary {
     pub risk_level: RiskLevel,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PolicyConfig {
     pub max_critical: usize,
     pub max_high: usize,
     pub cache_enabled: bool,
     pub cache_ttl_hours: u64,
+    pub license: LicensePolicy,
 }
 
 impl Default for PolicyConfig {
@@ -162,6 +168,7 @@ impl Default for PolicyConfig {
             max_high: 0,
             cache_enabled: true,
             cache_ttl_hours: 24,
+            license: LicensePolicy::default(),
         }
     }
 }

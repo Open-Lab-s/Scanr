@@ -21,6 +21,13 @@ max_critical = 0
 max_high = 2
 cache_enabled = true
 cache_ttl_hours = 24
+
+[license]
+enabled = true
+block = ["GPL-3.0", "AGPL-3.0"]
+allow_only = []
+fail_on_unknown = true
+enforce_in_ci = true
 ```
 
 Resolution rules:
@@ -38,6 +45,8 @@ Checks:
 - Critical findings must be `<= max_critical`
 - High findings must be `<= max_high`
 - Vulnerability lookup must be complete (no lookup outage / no failed queries / no offline cache misses)
+- License policy is always evaluated and summarized
+- License violations are CI-blocking only when `[license].enforce_in_ci = true`
 
 Result output:
 
@@ -47,9 +56,10 @@ Result output:
 ## Exit Behavior
 
 - `0`: success
-- `1`: runtime or serialization failure
-- `2`: policy violation or policy load failure
-- `3`: lookup incomplete in CI mode
+- `1`: execution error (runtime/parse/serialization/policy read failure)
+- `2`: vulnerability policy violation
+- `3`: license policy violation
+- `4`: both vulnerability and license policy violations
 
 ## Baseline-Aware CI Mode
 

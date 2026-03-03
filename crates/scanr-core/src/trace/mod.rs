@@ -23,7 +23,10 @@ pub struct TraceReport {
     pub matches: Vec<TraceMatch>,
 }
 
-pub fn trace_dependency_paths(target_path: &Path, package_name: &str) -> Result<TraceReport, ScanError> {
+pub fn trace_dependency_paths(
+    target_path: &Path,
+    package_name: &str,
+) -> Result<TraceReport, ScanError> {
     let graph = build_node_graph(target_path)?;
     let mut matching_nodes = graph
         .all_nodes()
