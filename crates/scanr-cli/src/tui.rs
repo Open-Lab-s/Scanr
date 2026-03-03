@@ -41,7 +41,7 @@ enum ScanStatus {
 pub struct AppState {
     pub mode: AppMode,
     pub selected_index: usize,
-    pub scan_result: scanr_core::ScanResult,
+    pub scan_result: scanr_sca::ScanResult,
     has_scan_data: bool,
     selected_severity: usize,
     focus: Focus,
@@ -50,7 +50,7 @@ pub struct AppState {
     project_path: PathBuf,
     scan_status: ScanStatus,
     spinner_index: usize,
-    scan_receiver: Option<Receiver<Result<scanr_core::ScanResult, String>>>,
+    scan_receiver: Option<Receiver<Result<scanr_sca::ScanResult, String>>>,
 }
 
 impl AppState {
@@ -64,7 +64,7 @@ impl AppState {
             .map(ToString::to_string)
             .unwrap_or_else(|| display_path.clone());
 
-        let empty_result = scanr_core::ScanResult {
+        let empty_result = scanr_sca::ScanResult {
             target,
             path: display_path,
             total_dependencies: 0,
@@ -72,8 +72,8 @@ impl AppState {
             vulnerabilities: Vec::new(),
             upgrade_recommendations: Vec::new(),
             risk_score: 0,
-            severity_summary: scanr_core::SeveritySummary::default(),
-            risk_level: scanr_core::RiskLevel::Low,
+            severity_summary: scanr_sca::SeveritySummary::default(),
+            risk_level: scanr_sca::RiskLevel::Low,
             queried_dependencies: 0,
             failed_queries: 0,
             offline_missing: 0,
@@ -126,7 +126,7 @@ impl AppState {
         }
 
         let path = self.project_path.clone();
-        let (tx, rx) = mpsc::channel::<Result<scanr_core::ScanResult, String>>();
+        let (tx, rx) = mpsc::channel::<Result<scanr_sca::ScanResult, String>>();
         self.scan_receiver = Some(rx);
         self.scan_status = ScanStatus::Scanning;
         self.spinner_index = 0;
@@ -137,9 +137,12 @@ impl AppState {
                 .enable_all()
                 .build();
             let result = match runtime {
-                Ok(runtime) => runtime
-                    .block_on(scanr_core::scan_path(&path))
-                    .map_err(|error| error.to_string()),
+                Ok(runtime) => {
+                    let engine = scanr_sca::ScaEngine::new();
+                    runtime
+                        .block_on(engine.scan_detailed(&path))
+                        .map_err(|error| error.to_string())
+                }
                 Err(error) => Err(format!("runtime initialization failed: {error}")),
             };
             let _ = tx.send(result);
@@ -399,9 +402,9 @@ fn render_severity_panel(frame: &mut Frame, app: &AppState, area: Rect) {
                 }
             ),
             match app.scan_result.risk_level {
-                scanr_core::RiskLevel::High => Style::default().fg(Color::Red),
-                scanr_core::RiskLevel::Moderate => Style::default().fg(Color::Yellow),
-                scanr_core::RiskLevel::Low => Style::default().fg(Color::Green),
+                scanr_sca::RiskLevel::High => Style::default().fg(Color::Red),
+                scanr_sca::RiskLevel::Moderate => Style::default().fg(Color::Yellow),
+                scanr_sca::RiskLevel::Low => Style::default().fg(Color::Green),
             }
             .add_modifier(Modifier::BOLD),
         )),
@@ -763,7 +766,7 @@ fn recommendation_details(app: &AppState) -> String {
 }
 
 fn dependency_cve_map(
-    vulnerabilities: &[scanr_core::Vulnerability],
+    vulnerabilities: &[scanr_sca::Vulnerability],
 ) -> HashMap<String, Vec<String>> {
     let mut map = HashMap::<String, Vec<String>>::new();
     for vulnerability in vulnerabilities {
@@ -782,7 +785,7 @@ fn dependency_cve_map(
     map
 }
 
-fn vulnerable_dependency_names(vulnerabilities: &[scanr_core::Vulnerability]) -> HashSet<String> {
+fn vulnerable_dependency_names(vulnerabilities: &[scanr_sca::Vulnerability]) -> HashSet<String> {
     vulnerabilities
         .iter()
         .map(|vulnerability| package_name_from_description(&vulnerability.description))
@@ -835,23 +838,23 @@ fn style_severity_line(
     Line::from(Span::styled(label, style))
 }
 
-fn severity_rank(severity: scanr_core::Severity) -> u8 {
+fn severity_rank(severity: scanr_sca::Severity) -> u8 {
     match severity {
-        scanr_core::Severity::Critical => 0,
-        scanr_core::Severity::High => 1,
-        scanr_core::Severity::Medium => 2,
-        scanr_core::Severity::Low => 3,
-        scanr_core::Severity::Unknown => 4,
+        scanr_sca::Severity::Critical => 0,
+        scanr_sca::Severity::High => 1,
+        scanr_sca::Severity::Medium => 2,
+        scanr_sca::Severity::Low => 3,
+        scanr_sca::Severity::Unknown => 4,
     }
 }
 
-fn severity_style(severity: scanr_core::Severity) -> Style {
+fn severity_style(severity: scanr_sca::Severity) -> Style {
     match severity {
-        scanr_core::Severity::Critical => Style::default().fg(Color::Red),
-        scanr_core::Severity::High => Style::default().fg(Color::LightRed),
-        scanr_core::Severity::Medium => Style::default().fg(Color::Yellow),
-        scanr_core::Severity::Low => Style::default().fg(Color::Blue),
-        scanr_core::Severity::Unknown => Style::default().fg(Color::Gray),
+        scanr_sca::Severity::Critical => Style::default().fg(Color::Red),
+        scanr_sca::Severity::High => Style::default().fg(Color::LightRed),
+        scanr_sca::Severity::Medium => Style::default().fg(Color::Yellow),
+        scanr_sca::Severity::Low => Style::default().fg(Color::Blue),
+        scanr_sca::Severity::Unknown => Style::default().fg(Color::Gray),
     }
 }
 

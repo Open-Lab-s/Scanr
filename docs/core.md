@@ -1,6 +1,6 @@
-# Scanr Core
+# Scanr SCA
 
-`scanr-core` is the shared security engine crate used by `scanr-cli`.
+`scanr-sca` is the SCA engine implementation used by `scanr-cli`.
 
 ## Responsibilities
 
@@ -106,4 +106,4 @@ pub struct ScanResult {
 
 ## Crate Location
 
-- `crates/scanr-core`
+- `crates/scanr-sca`

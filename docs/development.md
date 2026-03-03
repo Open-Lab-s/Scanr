@@ -35,7 +35,8 @@ cargo run -p scanr-cli -- sbom diff old.cdx.json new.cdx.json
 ## Workspace Layout
 
 ```text
-crates/scanr-core     reusable security engine and models
+crates/scanr-engine   shared engine contracts and finding schema
+crates/scanr-sca      SCA engine implementation and models
 crates/scanr-cli      command and TUI frontend
 installers/           packaging assets (npm, bun, brew, aur, curl)
 docs/                 mkdocs source pages

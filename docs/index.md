@@ -3,7 +3,8 @@
 Scanr is a Rust dependency security scanner with two first-class crates:
 
 - `scanr-cli`: command and terminal UI layer
-- `scanr-core`: parsing, vulnerability, policy, SBOM, and output models
+- `scanr-engine`: shared engine contracts and unified findings
+- `scanr-sca`: SCA implementation (parsing, vulnerability, policy, SBOM, and outputs)
 
 ## Core Capabilities
 
@@ -40,7 +41,8 @@ scanr sbom generate
 ```text
 F:\Scanr
 ├── crates/
-│   ├── scanr-core/    # reusable scan engine
+│   ├── scanr-engine/  # shared engine contracts
+│   ├── scanr-sca/     # SCA engine implementation
 │   └── scanr-cli/     # user-facing CLI and TUI
 ├── installers/        # npm, bun, brew, aur, curl assets
 ├── docs/              # mkdocs content
@@ -57,5 +59,5 @@ F:\Scanr
 - **Output Formats**: human, JSON, SARIF, raw JSON
 - **CI Policy**: `scanr.toml` policy model and CI exit behavior
 - **SBOM**: CycloneDX generation and diff behavior
-- **Scanr Core**: core models and API surface
+- **Scanr SCA**: SCA models and API surface
 - **Development**: build, test, release, and contribution workflow

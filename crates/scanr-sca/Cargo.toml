@@ -1,22 +1,23 @@
 [package]
-name = "scanr-core"
+name = "scanr-sca"
 version = "0.1.1"
 edition = "2024"
-description = "Core scanning and reporting engine for Scanr"
+description = "SCA engine implementation for Scanr"
 license = "Apache-2.0"
 repository = "https://github.com/scanr-dev/scanr"
 homepage = "https://scanr.dev"
 readme = "../../README.md"
-keywords = ["security", "devsecops", "sbom", "vulnerability", "scanner"]
+keywords = ["security", "devsecops", "sbom", "vulnerability", "sca"]
 categories = ["development-tools"]
 
 [dependencies]
 futures = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+scanr-engine = { path = "../scanr-engine" }
 semver = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tokio = { version = "1.43", features = ["time"] }
+tokio = { version = "1.43", features = ["time", "rt-multi-thread"] }
 toml = "0.8"
 walkdir = "2.5"
 time = { version = "0.3", features = ["formatting", "parsing"] }

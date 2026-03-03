@@ -9,6 +9,10 @@ use std::time::Duration;
 
 use futures::stream::{self, StreamExt};
 use reqwest::StatusCode;
+use scanr_engine::{
+    EngineError, EngineResult, EngineType, Finding, ScanEngine, ScanInput, ScanMetadata,
+    ScanResult as EngineScanResult,
+};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value as JsonValue};
@@ -30,6 +34,7 @@ pub use license::{
     LicenseEvaluationResult, LicenseInfo, LicensePolicy, LicenseViolation, evaluate_licenses,
     extract_licenses,
 };
+pub use scanr_engine::Severity;
 pub use trace::{TraceMatch, TraceReport, trace_dependency_paths};
 
 const OSV_QUERY_URL: &str = "https://api.osv.dev/v1/query";
@@ -44,8 +49,59 @@ const SUPPORTED_MANIFESTS: [&str; 6] = [
     "Cargo.lock",
 ];
 
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ScaEngine;
+
+impl ScaEngine {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub async fn scan_detailed(&self, path: &Path) -> Result<ScanResult, ScanError> {
+        scan_path(path).await
+    }
+
+    pub async fn scan_detailed_with_options(
+        &self,
+        path: &Path,
+        options: &ScanOptions,
+    ) -> Result<ScanResult, ScanError> {
+        scan_path_with_options(path, options).await
+    }
+}
+
+impl ScanEngine for ScaEngine {
+    fn name(&self) -> &'static str {
+        "sca"
+    }
+
+    fn scan(&self, input: ScanInput) -> EngineResult<EngineScanResult> {
+        let path = match input {
+            ScanInput::Path(path) => path,
+            ScanInput::Image(_) => {
+                return Err(EngineError::new(
+                    "unsupported scan input for sca engine: image",
+                ));
+            }
+            ScanInput::Tar(_) => {
+                return Err(EngineError::new(
+                    "unsupported scan input for sca engine: tar",
+                ));
+            }
+        };
+
+        let runtime = tokio::runtime::Runtime::new().map_err(|error| {
+            EngineError::new(format!("failed to create tokio runtime: {error}"))
+        })?;
+        let detailed = runtime
+            .block_on(scan_path(&path))
+            .map_err(|error| EngineError::new(error.to_string()))?;
+        Ok(convert_to_engine_scan_result(&detailed))
+    }
+}
+
 pub fn placeholder_status() -> &'static str {
-    "scanr-core placeholder"
+    "scanr-sca placeholder"
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -72,28 +128,6 @@ pub struct Dependency {
     pub version: String,
     pub ecosystem: Ecosystem,
     pub direct: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Severity {
-    Critical,
-    High,
-    Medium,
-    Low,
-    Unknown,
-}
-
-impl Display for Severity {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Critical => write!(f, "critical"),
-            Self::High => write!(f, "high"),
-            Self::Medium => write!(f, "medium"),
-            Self::Low => write!(f, "low"),
-            Self::Unknown => write!(f, "unknown"),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -725,6 +759,33 @@ pub async fn scan_path_with_options(
         lookup_error,
         cache_events: vulnerability_report.cache_events,
     })
+}
+
+fn convert_to_engine_scan_result(scan_result: &ScanResult) -> EngineScanResult {
+    let findings = scan_result
+        .vulnerabilities
+        .iter()
+        .map(|vulnerability| Finding {
+            id: vulnerability.cve_id.clone(),
+            engine: EngineType::SCA,
+            severity: vulnerability.severity,
+            title: short_message_from_description(&vulnerability.description),
+            description: vulnerability.description.clone(),
+            location: Some(scan_result.path.clone()),
+            remediation: vulnerability.remediation.clone(),
+        })
+        .collect::<Vec<_>>();
+
+    EngineScanResult {
+        findings,
+        metadata: ScanMetadata {
+            engine: EngineType::SCA,
+            engine_name: "sca".to_string(),
+            target: scan_result.target.clone(),
+            total_dependencies: scan_result.total_dependencies as usize,
+            total_vulnerabilities: scan_result.vulnerabilities.len(),
+        },
+    }
 }
 
 pub fn scan_result_to_sarif(scan_result: &ScanResult) -> SarifReport {
@@ -1709,20 +1770,20 @@ fn extract_severity(vulnerability: &OsvVulnerability) -> Severity {
         .as_ref()
         .and_then(|database_specific| database_specific.severity.as_deref())
     {
-        let severity = Severity::from_label(label);
+        let severity = severity_from_label(label);
         if severity != Severity::Unknown {
             return severity;
         }
     }
 
     for entry in &vulnerability.severity {
-        let by_label = Severity::from_label(&entry.score);
+        let by_label = severity_from_label(&entry.score);
         if by_label != Severity::Unknown {
             return by_label;
         }
 
         if let Ok(score) = entry.score.parse::<f32>() {
-            return Severity::from_cvss_score(score);
+            return severity_from_cvss_score(score);
         }
     }
 
@@ -1999,34 +2060,32 @@ fn deterministic_uuid(target: &str, path: &str, dependency_count: usize) -> Stri
     )
 }
 
-impl Severity {
-    fn from_label(label: &str) -> Severity {
-        let normalized = label.to_ascii_lowercase();
-        if normalized.contains("critical") {
-            Severity::Critical
-        } else if normalized.contains("high") {
-            Severity::High
-        } else if normalized.contains("medium") || normalized.contains("moderate") {
-            Severity::Medium
-        } else if normalized.contains("low") {
-            Severity::Low
-        } else {
-            Severity::Unknown
-        }
+fn severity_from_label(label: &str) -> Severity {
+    let normalized = label.to_ascii_lowercase();
+    if normalized.contains("critical") {
+        Severity::Critical
+    } else if normalized.contains("high") {
+        Severity::High
+    } else if normalized.contains("medium") || normalized.contains("moderate") {
+        Severity::Medium
+    } else if normalized.contains("low") {
+        Severity::Low
+    } else {
+        Severity::Unknown
     }
+}
 
-    fn from_cvss_score(score: f32) -> Severity {
-        if score >= 9.0 {
-            Severity::Critical
-        } else if score >= 7.0 {
-            Severity::High
-        } else if score >= 4.0 {
-            Severity::Medium
-        } else if score > 0.0 {
-            Severity::Low
-        } else {
-            Severity::Unknown
-        }
+fn severity_from_cvss_score(score: f32) -> Severity {
+    if score >= 9.0 {
+        Severity::Critical
+    } else if score >= 7.0 {
+        Severity::High
+    } else if score >= 4.0 {
+        Severity::Medium
+    } else if score > 0.0 {
+        Severity::Low
+    } else {
+        Severity::Unknown
     }
 }
 

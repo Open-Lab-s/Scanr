@@ -5,7 +5,8 @@ Scanr is a Rust security scanner focused on dependency intelligence for engineer
 It is split into:
 
 - `scanr-cli`: end-user CLI and TUI (`scanr`)
-- `scanr-core`: reusable scan engine and data models
+- `scanr-engine`: shared engine contracts and unified finding model
+- `scanr-sca`: SCA engine implementation and data models
 
 ## What Scanr Currently Does
 
@@ -90,7 +91,8 @@ mkdocs serve
 ```text
 F:\Scanr
 ├── crates/
-│   ├── scanr-core/
+│   ├── scanr-engine/
+│   ├── scanr-sca/
 │   └── scanr-cli/
 ├── installers/
 ├── docs/
