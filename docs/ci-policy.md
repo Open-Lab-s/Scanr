@@ -19,6 +19,8 @@ Example:
 ```toml
 max_critical = 0
 max_high = 2
+cache_enabled = true
+cache_ttl_hours = 24
 ```
 
 Resolution rules:
@@ -35,7 +37,7 @@ Checks:
 
 - Critical findings must be `<= max_critical`
 - High findings must be `<= max_high`
-- Vulnerability lookup must be complete (no lookup outage / no failed queries)
+- Vulnerability lookup must be complete (no lookup outage / no failed queries / no offline cache misses)
 
 Result output:
 

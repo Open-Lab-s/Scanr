@@ -14,6 +14,7 @@ nav:
   - Output Formats: output-formats.md
   - CI Policy: ci-policy.md
   - Baseline: baseline.md
+  - Cache: cache.md
   - SBOM: sbom.md
   - Scanr Core: core.md
   - Development: development.md

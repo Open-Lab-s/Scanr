@@ -12,6 +12,8 @@ It is split into:
 - Parses dependencies from Node, Python, and Rust manifests
 - Queries OSV for known vulnerabilities
 - Produces remediation suggestions and upgrade recommendations
+- Uses project-local OSV cache for fast and reproducible scans
+- Supports offline scans from cache and explicit refresh mode
 - Classifies risk (LOW / MODERATE / HIGH) with severity counters
 - Enforces CI policy from `scanr.toml`
 - Supports vulnerability baseline and security debt delta tracking
@@ -45,6 +47,8 @@ scanr scan .
 scanr scan . --ci
 scanr scan . --json
 scanr scan . --sarif
+scanr scan . --offline
+scanr scan . --refresh
 scanr scan . --baseline
 scanr baseline save
 scanr baseline status
@@ -69,6 +73,7 @@ scanr
   - [`docs/output-formats.md`](docs/output-formats.md)
   - [`docs/ci-policy.md`](docs/ci-policy.md)
   - [`docs/baseline.md`](docs/baseline.md)
+  - [`docs/cache.md`](docs/cache.md)
   - [`docs/sbom.md`](docs/sbom.md)
   - [`docs/tui.md`](docs/tui.md)
 

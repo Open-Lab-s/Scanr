@@ -6,6 +6,7 @@
 
 - Parse dependencies from supported manifest formats
 - Query OSV and normalize vulnerability records
+- Manage project-local OSV cache with TTL/offline controls
 - Generate upgrade recommendations
 - Summarize risk and evaluate CI policy
 - Save/load baseline snapshots and compute deterministic deltas
@@ -44,7 +45,9 @@ pub struct ScanResult {
     pub risk_level: RiskLevel,
     pub queried_dependencies: u32,
     pub failed_queries: u32,
+    pub offline_missing: u32,
     pub lookup_error: Option<String>,
+    pub cache_events: Vec<String>,
 }
 ```
 
@@ -52,10 +55,12 @@ pub struct ScanResult {
 
 - `scan_dependencies(path)`
 - `scan_path(path)`
+- `scan_path_with_options(path, options)`
 - `save_baseline_for_target(path, scan_result)`
 - `load_baseline_for_target(path)`
 - `compare_scan_result_to_baseline(scan_result, baseline)`
 - `investigate_vulnerabilities(dependencies)`
+- `investigate_vulnerabilities_with_options(dependencies, options)`
 - `summarize_risk(vulnerabilities)`
 - `evaluate_policy(summary, policy)`
 - `load_policy_for_target(path)`

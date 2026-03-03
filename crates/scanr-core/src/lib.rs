@@ -16,12 +16,14 @@ use tokio::time::sleep;
 use toml::Value as TomlValue;
 
 mod baseline;
+mod cache;
 
 pub use baseline::{
     BASELINE_RELATIVE_PATH, Baseline, BaselineDelta, BaselineEntry, baseline_path_for_target,
     build_baseline_from_scan_result, compare_scan_result_to_baseline, current_scanr_version,
     load_baseline_for_target, save_baseline_for_target,
 };
+use cache::{CacheDataState, CacheGetResult, CacheManager};
 
 const OSV_QUERY_URL: &str = "https://api.osv.dev/v1/query";
 const OSV_CONCURRENCY_LIMIT: usize = 8;
@@ -104,6 +106,8 @@ pub struct VulnerabilityReport {
     pub upgrade_recommendations: Vec<UpgradeRecommendation>,
     pub queried_dependencies: usize,
     pub failed_queries: usize,
+    pub offline_missing: usize,
+    pub cache_events: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -145,6 +149,8 @@ pub struct RiskSummary {
 pub struct PolicyConfig {
     pub max_critical: usize,
     pub max_high: usize,
+    pub cache_enabled: bool,
+    pub cache_ttl_hours: u64,
 }
 
 impl Default for PolicyConfig {
@@ -152,6 +158,8 @@ impl Default for PolicyConfig {
         Self {
             max_critical: 0,
             max_high: 0,
+            cache_enabled: true,
+            cache_ttl_hours: 24,
         }
     }
 }
@@ -193,7 +201,49 @@ pub struct ScanResult {
     pub risk_level: RiskLevel,
     pub queried_dependencies: u32,
     pub failed_queries: u32,
+    pub offline_missing: u32,
     pub lookup_error: Option<String>,
+    pub cache_events: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScanOptions {
+    pub cache_enabled: bool,
+    pub cache_ttl_hours: u64,
+    pub offline: bool,
+    pub force_refresh: bool,
+}
+
+impl Default for ScanOptions {
+    fn default() -> Self {
+        Self {
+            cache_enabled: true,
+            cache_ttl_hours: 24,
+            offline: false,
+            force_refresh: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct VulnerabilityQueryOptions {
+    pub cache_base_path: Option<PathBuf>,
+    pub cache_enabled: bool,
+    pub cache_ttl_hours: u64,
+    pub offline: bool,
+    pub force_refresh: bool,
+}
+
+impl Default for VulnerabilityQueryOptions {
+    fn default() -> Self {
+        Self {
+            cache_base_path: None,
+            cache_enabled: false,
+            cache_ttl_hours: 24,
+            offline: false,
+            force_refresh: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -599,6 +649,13 @@ pub fn generate_cyclonedx_sbom(path: &Path) -> Result<SbomDocument, ScanError> {
 }
 
 pub async fn scan_path(path: &Path) -> Result<ScanResult, ScanError> {
+    scan_path_with_options(path, &ScanOptions::default()).await
+}
+
+pub async fn scan_path_with_options(
+    path: &Path,
+    options: &ScanOptions,
+) -> Result<ScanResult, ScanError> {
     let dependencies = scan_dependencies(path)?;
     let resolved_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let target = resolved_path
@@ -607,9 +664,19 @@ pub async fn scan_path(path: &Path) -> Result<ScanResult, ScanError> {
         .map(ToString::to_string)
         .unwrap_or_else(|| resolved_path.display().to_string());
     let display_path = normalize_windows_verbatim_path(resolved_path.display().to_string());
+    let cache_base_path = resolve_scan_root(path);
+
+    let vulnerability_options = VulnerabilityQueryOptions {
+        cache_base_path: Some(cache_base_path),
+        cache_enabled: options.cache_enabled,
+        cache_ttl_hours: options.cache_ttl_hours,
+        offline: options.offline,
+        force_refresh: options.force_refresh,
+    };
 
     let (vulnerability_report, lookup_error) =
-        match investigate_vulnerabilities(&dependencies).await {
+        match investigate_vulnerabilities_with_options(&dependencies, &vulnerability_options).await
+        {
             Ok(report) => (report, None),
             Err(error) => (
                 VulnerabilityReport {
@@ -617,6 +684,8 @@ pub async fn scan_path(path: &Path) -> Result<ScanResult, ScanError> {
                     upgrade_recommendations: Vec::new(),
                     queried_dependencies: 0,
                     failed_queries: 0,
+                    offline_missing: 0,
+                    cache_events: Vec::new(),
                 },
                 Some(error.to_string()),
             ),
@@ -643,7 +712,9 @@ pub async fn scan_path(path: &Path) -> Result<ScanResult, ScanError> {
         risk_level: risk_summary.risk_level,
         queried_dependencies: to_u32(vulnerability_report.queried_dependencies),
         failed_queries: to_u32(vulnerability_report.failed_queries),
+        offline_missing: to_u32(vulnerability_report.offline_missing),
         lookup_error,
+        cache_events: vulnerability_report.cache_events,
     })
 }
 
@@ -946,34 +1017,61 @@ fn normalize_windows_verbatim_path(path: String) -> String {
 pub async fn investigate_vulnerabilities(
     dependencies: &[Dependency],
 ) -> Result<VulnerabilityReport, ScanError> {
+    investigate_vulnerabilities_with_options(dependencies, &VulnerabilityQueryOptions::default())
+        .await
+}
+
+pub async fn investigate_vulnerabilities_with_options(
+    dependencies: &[Dependency],
+    options: &VulnerabilityQueryOptions,
+) -> Result<VulnerabilityReport, ScanError> {
     if dependencies.is_empty() {
         return Ok(VulnerabilityReport {
             vulnerabilities: Vec::new(),
             upgrade_recommendations: Vec::new(),
             queried_dependencies: 0,
             failed_queries: 0,
+            offline_missing: 0,
+            cache_events: Vec::new(),
         });
     }
 
     let client = reqwest::Client::builder()
         .user_agent("scanr/0.1.0")
         .build()?;
+    let cache_manager = options.cache_base_path.as_ref().map(|base_path| {
+        CacheManager::new(
+            base_path,
+            options.cache_ttl_hours,
+            options.offline,
+            options.force_refresh,
+            options.cache_enabled,
+        )
+    });
 
     let targets = prepare_vulnerability_targets(dependencies);
     let queried_dependencies = targets.len();
     let mut failed_queries = 0usize;
+    let mut offline_missing = 0usize;
     let mut vulnerabilities = Vec::new();
     let mut recommendations = Vec::new();
+    let mut cache_events = Vec::new();
 
     let mut tasks = stream::iter(targets.into_iter().map(|target| {
         let client = client.clone();
-        async move { fetch_vulnerabilities_for_dependency(&client, target).await }
+        let cache_manager = cache_manager.clone();
+        async move { fetch_vulnerabilities_for_dependency(&client, target, cache_manager).await }
     }))
     .buffer_unordered(OSV_CONCURRENCY_LIMIT);
 
     while let Some(result) = tasks.next().await {
         match result {
             Ok(package_result) => {
+                failed_queries += usize::from(package_result.failed_query);
+                offline_missing += usize::from(package_result.offline_missing);
+                if let Some(event) = package_result.cache_event {
+                    cache_events.push(event);
+                }
                 vulnerabilities.extend(package_result.vulnerabilities);
                 if let Some(recommendation) = package_result.recommendation {
                     recommendations.push(recommendation);
@@ -998,12 +1096,16 @@ pub async fn investigate_vulnerabilities(
             && a.current_version == b.current_version
             && a.suggested_version == b.suggested_version
     });
+    cache_events.sort();
+    cache_events.dedup();
 
     Ok(VulnerabilityReport {
         vulnerabilities,
         upgrade_recommendations: recommendations,
         queried_dependencies,
         failed_queries,
+        offline_missing,
+        cache_events,
     })
 }
 
@@ -1087,6 +1189,14 @@ fn resolve_policy_path(target_path: &Path) -> PathBuf {
     target_path.join("scanr.toml")
 }
 
+fn resolve_scan_root(target_path: &Path) -> PathBuf {
+    if target_path.is_file() {
+        let parent = target_path.parent().unwrap_or_else(|| Path::new("."));
+        return fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+    }
+    fs::canonicalize(target_path).unwrap_or_else(|_| target_path.to_path_buf())
+}
+
 #[derive(Debug, Clone)]
 struct VulnerabilityTarget {
     dependency: Dependency,
@@ -1097,6 +1207,9 @@ struct VulnerabilityTarget {
 struct PackageInvestigationResult {
     vulnerabilities: Vec<Vulnerability>,
     recommendation: Option<UpgradeRecommendation>,
+    failed_query: bool,
+    offline_missing: bool,
+    cache_event: Option<String>,
 }
 
 fn prepare_vulnerability_targets(dependencies: &[Dependency]) -> Vec<VulnerabilityTarget> {
@@ -1127,7 +1240,11 @@ fn prepare_vulnerability_targets(dependencies: &[Dependency]) -> Vec<Vulnerabili
 async fn fetch_vulnerabilities_for_dependency(
     client: &reqwest::Client,
     target: VulnerabilityTarget,
+    cache_manager: Option<CacheManager>,
 ) -> Result<PackageInvestigationResult, ScanError> {
+    let offline_mode = cache_manager
+        .as_ref()
+        .is_some_and(|manager| manager.offline);
     let ecosystem = osv_ecosystem(target.dependency.ecosystem);
     let request = OsvQueryRequest {
         package: OsvPackageQuery {
@@ -1136,7 +1253,54 @@ async fn fetch_vulnerabilities_for_dependency(
         },
     };
 
-    let payload = query_osv_with_retry(client, &request).await?;
+    let (payload_json, cache_event, offline_missing) = if let Some(cache_manager) = cache_manager {
+        match cache_manager
+            .get_or_fetch(&target.dependency, || {
+                query_osv_json_with_retry(client, &request)
+            })
+            .await?
+        {
+            CacheGetResult::Data { payload, state } => {
+                let event = match state {
+                    CacheDataState::Hit => Some(format!(
+                        "Using cached OSV data for {}@{}",
+                        target.dependency.name, target.dependency.version
+                    )),
+                    CacheDataState::Refreshed => Some(format!(
+                        "Refreshing OSV data for {}@{}",
+                        target.dependency.name, target.dependency.version
+                    )),
+                    CacheDataState::Fetched => None,
+                };
+                (payload, event, false)
+            }
+            CacheGetResult::OfflineMiss => {
+                return Ok(PackageInvestigationResult {
+                    vulnerabilities: Vec::new(),
+                    recommendation: None,
+                    failed_query: false,
+                    offline_missing: true,
+                    cache_event: Some(format!(
+                        "Offline cache miss for {}@{}; vulnerability status unknown (offline)",
+                        target.dependency.name, target.dependency.version
+                    )),
+                });
+            }
+        }
+    } else {
+        (
+            query_osv_json_with_retry(client, &request).await?,
+            None,
+            false,
+        )
+    };
+
+    let payload = serde_json::from_value::<OsvQueryResponse>(payload_json).map_err(|source| {
+        ScanError::Json {
+            path: PathBuf::from(OSV_QUERY_URL),
+            source,
+        }
+    })?;
 
     let mut vulnerabilities = Vec::new();
     for vuln in &payload.vulns {
@@ -1173,28 +1337,36 @@ async fn fetch_vulnerabilities_for_dependency(
         });
     }
 
-    let recommendation = recommend_safe_upgrade(client, &target, &payload.vulns, &vulnerabilities)
-        .await
-        .unwrap_or(None);
+    let recommendation = recommend_safe_upgrade(
+        client,
+        &target,
+        &payload.vulns,
+        &vulnerabilities,
+        !offline_mode,
+    )
+    .await
+    .unwrap_or(None);
 
     Ok(PackageInvestigationResult {
         vulnerabilities,
         recommendation,
+        failed_query: false,
+        offline_missing,
+        cache_event,
     })
 }
 
-async fn query_osv_with_retry(
+async fn query_osv_json_with_retry(
     client: &reqwest::Client,
     request: &OsvQueryRequest,
-) -> Result<OsvQueryResponse, ScanError> {
+) -> Result<JsonValue, ScanError> {
     for attempt in 0..=OSV_MAX_RETRIES {
         let result = client.post(OSV_QUERY_URL).json(request).send().await;
         match result {
             Ok(response) => {
                 let status = response.status();
                 if status.is_success() {
-                    let payload: OsvQueryResponse = response.json().await?;
-                    return Ok(payload);
+                    return response.json().await.map_err(ScanError::from);
                 }
 
                 if attempt < OSV_MAX_RETRIES && is_retryable_status(status) {
@@ -1226,14 +1398,18 @@ async fn recommend_safe_upgrade(
     target: &VulnerabilityTarget,
     package_vulns: &[OsvVulnerability],
     current_vulnerabilities: &[Vulnerability],
+    allow_registry_fetch: bool,
 ) -> Result<Option<UpgradeRecommendation>, ScanError> {
     if current_vulnerabilities.is_empty() {
         return Ok(None);
     }
 
-    let registry_versions =
+    let registry_versions = if allow_registry_fetch {
         fetch_registry_versions(client, target.dependency.ecosystem, &target.dependency.name)
-            .await?;
+            .await?
+    } else {
+        Vec::new()
+    };
 
     let mut candidates = registry_versions
         .into_iter()

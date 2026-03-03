@@ -41,6 +41,12 @@ enum Commands {
         /// Compare current findings against .scanr/baseline.json.
         #[arg(long, conflicts_with_all = ["json", "sarif"])]
         baseline: bool,
+        /// Use only local cache; do not call OSV.
+        #[arg(long, conflicts_with = "refresh")]
+        offline: bool,
+        /// Force refresh OSV cache, ignoring TTL.
+        #[arg(long, conflicts_with = "offline")]
+        refresh: bool,
         /// Recursively scan subdirectories for supported manifest files.
         #[arg(short, long)]
         recursive: bool,
@@ -106,7 +112,9 @@ struct ScanRawOutput {
     dependencies_analyzed: usize,
     queried_dependencies: usize,
     failed_queries: usize,
+    offline_missing: usize,
     lookup_error: Option<String>,
+    cache_events: Vec<String>,
     risk_summary: scanr_core::RiskSummary,
     policy_path: Option<String>,
     policy: Option<scanr_core::PolicyConfig>,
@@ -152,9 +160,29 @@ async fn main() {
             raw_json,
             raw_json_out,
             baseline,
+            offline,
+            refresh,
             recursive: _,
         }) => {
-            let scan_result = match scanr_core::scan_path(&path).await {
+            let loaded_policy = scanr_core::load_policy_for_target(&path);
+            let cache_settings = match &loaded_policy {
+                Ok((policy, _)) => (policy.cache_enabled, policy.cache_ttl_hours),
+                Err(error) => {
+                    eprintln!(
+                        "Warning: failed to load scanr.toml for cache settings ({error}); using defaults cache_enabled=true cache_ttl_hours=24."
+                    );
+                    (true, 24)
+                }
+            };
+
+            let scan_options = scanr_core::ScanOptions {
+                cache_enabled: cache_settings.0,
+                cache_ttl_hours: cache_settings.1,
+                offline,
+                force_refresh: refresh,
+            };
+
+            let scan_result = match scanr_core::scan_path_with_options(&path, &scan_options).await {
                 Ok(scan_result) => scan_result,
                 Err(error) => {
                     eprintln!("Scan failed: {error}");
@@ -192,6 +220,13 @@ async fn main() {
                 println!("Target: {}", scan_result.target);
                 println!("Path: {}", scan_result.path);
                 println!("Dependencies analyzed: {}", scan_result.total_dependencies);
+
+                if !scan_result.cache_events.is_empty() {
+                    println!();
+                    for event in &scan_result.cache_events {
+                        println!("{event}");
+                    }
+                }
 
                 if list_deps {
                     println!();
@@ -241,6 +276,14 @@ async fn main() {
                     eprintln!(
                         "Warning: OSV lookup failed for {}/{} dependencies. Results may be incomplete.",
                         scan_result.failed_queries, scan_result.queried_dependencies
+                    );
+                }
+
+                if scan_result.offline_missing > 0 {
+                    println!();
+                    eprintln!(
+                        "Warning: offline cache miss for {} dependencies. Vulnerability status unknown (offline).",
+                        scan_result.offline_missing
                     );
                 }
 
@@ -370,7 +413,7 @@ async fn main() {
                     }
                 } else {
                     println!("CI Policy Check");
-                    match scanr_core::load_policy_for_target(&path) {
+                    match &loaded_policy {
                         Ok((loaded_policy, loaded_policy_path)) => {
                             if let Some(policy_path) = loaded_policy_path {
                                 let normalized = normalize_windows_verbatim_path(
@@ -402,7 +445,7 @@ async fn main() {
                                 ci_exit_code = 2;
                             }
 
-                            policy = Some(loaded_policy);
+                            policy = Some(*loaded_policy);
                             policy_evaluation = Some(evaluation);
                         }
                         Err(error) => {
@@ -412,7 +455,10 @@ async fn main() {
                     }
                 }
 
-                if scan_result.lookup_error.is_some() || scan_result.failed_queries > 0 {
+                if scan_result.lookup_error.is_some()
+                    || scan_result.failed_queries > 0
+                    || scan_result.offline_missing > 0
+                {
                     println!("Result: FAIL");
                     println!(
                         "- vulnerability lookup incomplete; CI mode requires complete OSV results"
@@ -428,7 +474,9 @@ async fn main() {
                 dependencies_analyzed: scan_result.total_dependencies as usize,
                 queried_dependencies: scan_result.queried_dependencies as usize,
                 failed_queries: scan_result.failed_queries as usize,
+                offline_missing: scan_result.offline_missing as usize,
                 lookup_error: scan_result.lookup_error.clone(),
+                cache_events: scan_result.cache_events.clone(),
                 risk_summary: risk_summary_from_scan_result(&scan_result),
                 policy_path: policy_path_display,
                 policy,
@@ -546,13 +594,26 @@ async fn main() {
         },
         Some(Commands::Baseline { command }) => match command {
             BaselineCommands::Save { path } => {
-                let scan_result = match scanr_core::scan_path(&path).await {
-                    Ok(scan_result) => scan_result,
-                    Err(error) => {
-                        eprintln!("Scan failed: {error}");
-                        process::exit(1);
-                    }
+                let loaded_policy = scanr_core::load_policy_for_target(&path);
+                let (cache_enabled, cache_ttl_hours) = match &loaded_policy {
+                    Ok((policy, _)) => (policy.cache_enabled, policy.cache_ttl_hours),
+                    Err(_) => (true, 24),
                 };
+                let scan_options = scanr_core::ScanOptions {
+                    cache_enabled,
+                    cache_ttl_hours,
+                    offline: false,
+                    force_refresh: false,
+                };
+
+                let scan_result =
+                    match scanr_core::scan_path_with_options(&path, &scan_options).await {
+                        Ok(scan_result) => scan_result,
+                        Err(error) => {
+                            eprintln!("Scan failed: {error}");
+                            process::exit(1);
+                        }
+                    };
 
                 if scan_result.lookup_error.is_some() || scan_result.failed_queries > 0 {
                     eprintln!(
@@ -597,13 +658,26 @@ async fn main() {
                     }
                 };
 
-                let scan_result = match scanr_core::scan_path(&path).await {
-                    Ok(scan_result) => scan_result,
-                    Err(error) => {
-                        eprintln!("Scan failed: {error}");
-                        process::exit(1);
-                    }
+                let loaded_policy = scanr_core::load_policy_for_target(&path);
+                let (cache_enabled, cache_ttl_hours) = match &loaded_policy {
+                    Ok((policy, _)) => (policy.cache_enabled, policy.cache_ttl_hours),
+                    Err(_) => (true, 24),
                 };
+                let scan_options = scanr_core::ScanOptions {
+                    cache_enabled,
+                    cache_ttl_hours,
+                    offline: false,
+                    force_refresh: false,
+                };
+
+                let scan_result =
+                    match scanr_core::scan_path_with_options(&path, &scan_options).await {
+                        Ok(scan_result) => scan_result,
+                        Err(error) => {
+                            eprintln!("Scan failed: {error}");
+                            process::exit(1);
+                        }
+                    };
                 let delta = scanr_core::compare_scan_result_to_baseline(&scan_result, &baseline);
 
                 println!("Baseline Status");
