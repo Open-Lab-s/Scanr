@@ -49,6 +49,30 @@ Result output:
 - `2`: policy violation or policy load failure
 - `3`: lookup incomplete in CI mode
 
+## Baseline-Aware CI Mode
+
+Command:
+
+```bash
+scanr scan . --ci --baseline
+```
+
+Behavior when baseline file exists:
+
+- Uses `.scanr/baseline.json` comparison instead of threshold policy
+- Fails only when **new** vulnerabilities are detected
+- Passes when only baseline-known vulnerabilities remain
+- Passes and reports improvement when vulnerabilities are fixed
+
+Delta model:
+
+- `NEW = current - baseline`
+- `FIXED = baseline - current`
+
+When baseline file is missing:
+
+- Scanr prints a warning and falls back to normal `scanr.toml` policy mode
+
 ## Example Output
 
 ```text

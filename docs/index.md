@@ -14,6 +14,7 @@ Scanr is a Rust dependency security scanner with two first-class crates:
 - Vulnerability investigation through OSV
 - Severity and risk classification
 - Upgrade recommendations (safe version targeting)
+- Baseline save/compare/status for incremental adoption
 - CI policy enforcement using `scanr.toml`
 - CycloneDX SBOM generation and SBOM diff
 - Structured output modes:
