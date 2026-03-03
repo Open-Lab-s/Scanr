@@ -8,9 +8,13 @@ theme:
 
 nav:
   - Home: index.md
-  - Scanr CLI: cli.md
-  - Scanr Core: core.md
   - Installation: installation.md
+  - Scanr CLI: cli.md
+  - TUI Mode: tui.md
+  - Output Formats: output-formats.md
+  - CI Policy: ci-policy.md
+  - SBOM: sbom.md
+  - Scanr Core: core.md
   - Development: development.md
 
 plugins:

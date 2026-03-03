@@ -1,49 +1,56 @@
 # Scanr
 
-Scanr is an open-source DevSecOps security engine built in Rust.
+Scanr is a Rust dependency security scanner with two first-class crates:
 
-The repository is organized as a Rust workspace with two primary crates:
+- `scanr-cli`: command and terminal UI layer
+- `scanr-core`: parsing, vulnerability, policy, SBOM, and output models
 
-- `scanr-cli`: user-facing command-line interface (`scanr`)
-- `scanr-core`: shared domain logic used by the CLI and future integrations
+## Core Capabilities
 
-## Current Milestone
+- Dependency parsing for:
+  - Node: `package.json`, `package-lock.json`
+  - Python: `requirements.txt`, `pyproject.toml`
+  - Rust: `Cargo.toml`, `Cargo.lock`
+- Vulnerability investigation through OSV
+- Severity and risk classification
+- Upgrade recommendations (safe version targeting)
+- CI policy enforcement using `scanr.toml`
+- CycloneDX SBOM generation and SBOM diff
+- Structured output modes:
+  - `--json`
+  - `--sarif`
+  - `--raw-json` / `--raw-json-out`
+- Interactive TUI with overview, dependencies, and recommendations views
 
-Milestone 2 adds dependency parsing for Node.js, Python, and Rust projects:
+## Quick Start
 
-- `scanr scan .`
-- `scanr sbom generate`
-- `scanr sbom diff old.json new.json`
+```bash
+scanr scan .
+scanr scan . --ci
+scanr scan . --json
+scanr sbom generate
+```
 
-Current `scanr scan <path>` support:
-
-- Node.js: `package.json`, `package-lock.json`, `npm-shrinkwrap.json`
-- Python: `requirements.txt`, `pyproject.toml`, `poetry.lock`
-- Rust: `Cargo.toml`, `Cargo.lock`
-
-Use `scanr scan <path> --recursive` to scan nested projects in monorepos.
-
-## Workspace Layout
+## Architecture
 
 ```text
 F:\Scanr
 ├── crates/
-│   ├── scanr-core/
-│   └── scanr-cli/
-├── installers/
-├── docs/
-└── Cargo.toml
+│   ├── scanr-core/    # reusable scan engine
+│   └── scanr-cli/     # user-facing CLI and TUI
+├── installers/        # npm, bun, brew, aur, curl assets
+├── docs/              # mkdocs content
+├── Cargo.toml         # workspace root
+└── mkdocs.yml         # docs site nav/config
 ```
 
-## Build
+## Documentation Map
 
-```bash
-cargo build --workspace --release
-```
-
-Use the pages in this documentation for details:
-
-- **Scanr CLI**: commands, flags, and output behavior
-- **Scanr Core**: crate role and API direction
-- **Installation**: supported distribution channels
-- **Development**: local build and contribution workflow
+- **Installation**: all supported install channels
+- **Scanr CLI**: commands, flags, and command output
+- **TUI Mode**: interactive full-screen UI and key bindings
+- **Output Formats**: human, JSON, SARIF, raw JSON
+- **CI Policy**: `scanr.toml` policy model and CI exit behavior
+- **SBOM**: CycloneDX generation and diff behavior
+- **Scanr Core**: core models and API surface
+- **Development**: build, test, release, and contribution workflow

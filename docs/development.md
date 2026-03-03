@@ -2,41 +2,61 @@
 
 ## Prerequisites
 
-- Rust toolchain (`stable`)
+- Rust stable toolchain
 - Git
+- Node.js (only if testing npm wrapper flows)
+- MkDocs (for docs preview)
 
-## Build
+## Build And Test
 
 ```bash
 cargo build --workspace --release
+cargo test --workspace
 ```
 
-## Run CLI During Development
+## Run Locally
 
 ```bash
+# interactive TUI
+cargo run -p scanr-cli --
+
+# regular scan
 cargo run -p scanr-cli -- scan .
+
+# structured outputs
+cargo run -p scanr-cli -- scan . --json
+cargo run -p scanr-cli -- scan . --sarif
+
+# SBOM operations
 cargo run -p scanr-cli -- sbom generate
-cargo run -p scanr-cli -- sbom diff old.json new.json
+cargo run -p scanr-cli -- sbom diff old.cdx.json new.cdx.json
 ```
 
-## Workspace Structure
+## Workspace Layout
 
 ```text
-crates/scanr-core  # reusable analysis library
-crates/scanr-cli   # scanr executable
+crates/scanr-core     reusable security engine and models
+crates/scanr-cli      command and TUI frontend
+installers/           packaging assets (npm, bun, brew, aur, curl)
+docs/                 mkdocs source pages
 ```
 
-## CI
+## CI And Release Workflows
 
-GitHub Actions workflow:
+- `.github/workflows/ci.yml`
+  - Builds workspace on push and pull request
+- `.github/workflows/release.yml`
+  - Builds release binaries for Linux/macOS/Windows
+  - Publishes release assets for tag builds
 
-- File: `.github/workflows/ci.yml`
-- Build step: `cargo build --workspace --release`
-- Triggers: push, pull request, manual dispatch
+## Package Distribution Files
 
-## Documentation
+- npm wrapper: `installers/npm`
+- Homebrew formula: `installers/homebrew/scanr.rb`
+- AUR package files: `installers/aur/PKGBUILD`, `installers/aur/.SRCINFO`
+- curl bootstrap installer: `installers/install.sh`
 
-To preview docs locally:
+## Docs Preview
 
 ```bash
 mkdocs serve
