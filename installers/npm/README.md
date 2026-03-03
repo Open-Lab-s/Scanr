@@ -1,16 +1,20 @@
 # @openlabs/scanr_cli
 
-Install and run the **Scanr CLI** from npm.
+**Scanr CLI** is an open-source **SCA (Software Composition Analysis)** and dependency vulnerability scanner for **Node.js, Python, and Rust**.
 
-Scanr is a dependency security scanner for Node, Python, and Rust projects with:
+Use it in local development and CI/CD pipelines to detect **CVE/OSV vulnerabilities**, generate **SBOM (CycloneDX)**, enforce security policy, and export **JSON/SARIF** reports.
 
-- OSV vulnerability detection
-- risk summary + CI policy checks
-- baseline security debt tracking
-- offline cache mode
-- CycloneDX SBOM generation/diff
-- JSON and SARIF output
-- interactive terminal UI
+## Features
+
+- Dependency scanning across `package-lock.json`, `requirements.txt`, `pyproject.toml`, `Cargo.lock`
+- CVE/OSV vulnerability lookup with severity and remediation hints
+- DevSecOps CI policy checks (`scanr.toml`) with deterministic exit codes
+- License compliance policy enforcement
+- Baseline security debt tracking (`scanr baseline save/status`)
+- Project-local cache with offline mode for stable pipeline runs
+- CycloneDX SBOM generation and SBOM diff
+- Structured outputs for automation: JSON and SARIF
+- Interactive full-screen TUI (`scanr`)
 
 ## Install
 
@@ -18,11 +22,17 @@ Scanr is a dependency security scanner for Node, Python, and Rust projects with:
 npm install -g @openlabs/scanr_cli
 ```
 
-After install, use:
+After install:
 
 ```bash
 scanr --version
 scanr --help
+```
+
+Bun users can install the same package:
+
+```bash
+bun install -g @openlabs/scanr_cli
 ```
 
 ## Quick Start
