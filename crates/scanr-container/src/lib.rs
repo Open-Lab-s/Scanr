@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::path::{Component, Path, PathBuf};
@@ -5,9 +6,10 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use scanr_engine::{EngineError, EngineType, ScanEngine, ScanInput, ScanMetadata, ScanResult};
-use scanr_sca::ScaEngine;
+use scanr_sca::{Dependency as ScaDependency, ScaEngine};
 use serde::Deserialize;
 use tempfile::TempDir;
+use walkdir::WalkDir;
 
 #[derive(Debug, Default, Clone)]
 pub struct ContainerEngine {
@@ -54,6 +56,13 @@ pub struct OsDependency {
     pub version: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ContainerDependency {
+    ecosystem: String,
+    name: String,
+    version: String,
+}
+
 #[derive(Debug)]
 struct AcquiredImage {
     source_mode: ImageSourceMode,
@@ -72,6 +81,12 @@ const MAX_EXTRACTION_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const MAX_EXTRACTION_ENTRIES: usize = 200_000;
 const MAX_PATH_COMPONENTS: usize = 64;
 const EXTRACTION_TIMEOUT: Duration = Duration::from_secs(120);
+const APP_MANIFEST_FILENAMES: [&str; 4] = [
+    "package.json",
+    "requirements.txt",
+    "Cargo.lock",
+    "pyproject.toml",
+];
 
 #[derive(Debug)]
 struct ExtractionGuard {
@@ -124,6 +139,8 @@ impl ScanEngine for ContainerEngine {
         let rootfs = self.build_rootfs(&acquired.image_extract_path)?;
         let distro = self.detect_distro(&rootfs.path);
         let os_dependencies = self.extract_os_dependencies(&rootfs.path, distro)?;
+        let app_dependencies = self.discover_application_dependencies(&rootfs.path)?;
+        let merged_dependencies = self.merge_dependencies(&os_dependencies, &app_dependencies);
 
         let _ = &self.sca_engine;
         let _ = rootfs.path.as_path();
@@ -135,7 +152,7 @@ impl ScanEngine for ContainerEngine {
                 engine: EngineType::Container,
                 engine_name: self.name().to_string(),
                 target: acquired.target_display,
-                total_dependencies: os_dependencies.len(),
+                total_dependencies: merged_dependencies.len(),
                 total_vulnerabilities: 0,
             },
         })
@@ -380,6 +397,73 @@ impl ContainerEngine {
             Distro::RHEL => self.extract_rhel_packages(rootfs_path),
             Distro::Distroless | Distro::Unknown => Ok(Vec::new()),
         }
+    }
+
+    fn discover_application_dependencies(
+        &self,
+        rootfs_path: &Path,
+    ) -> Result<Vec<ScaDependency>, EngineError> {
+        let manifest_paths = self.find_application_manifest_files(rootfs_path);
+        let mut dependencies = Vec::new();
+
+        for manifest_path in manifest_paths {
+            match scanr_sca::scan_dependencies(&manifest_path) {
+                Ok(mut parsed) => dependencies.append(&mut parsed),
+                Err(_) => {
+                    // Best-effort parsing for container filesystem; malformed app manifests are skipped.
+                }
+            }
+        }
+
+        Ok(dedupe_sca_dependencies(dependencies))
+    }
+
+    fn find_application_manifest_files(&self, rootfs_path: &Path) -> Vec<PathBuf> {
+        let mut manifests = Vec::new();
+        for entry in WalkDir::new(rootfs_path)
+            .follow_links(false)
+            .sort_by_file_name()
+            .into_iter()
+            .filter_map(Result::ok)
+        {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+
+            let Some(file_name) = entry.file_name().to_str() else {
+                continue;
+            };
+            if APP_MANIFEST_FILENAMES.contains(&file_name) {
+                manifests.push(entry.into_path());
+            }
+        }
+        manifests
+    }
+
+    fn merge_dependencies(
+        &self,
+        os_dependencies: &[OsDependency],
+        app_dependencies: &[ScaDependency],
+    ) -> Vec<ContainerDependency> {
+        let mut set = BTreeSet::new();
+
+        for dependency in os_dependencies {
+            set.insert(ContainerDependency {
+                ecosystem: dependency.ecosystem.clone(),
+                name: dependency.name.clone(),
+                version: dependency.version.clone(),
+            });
+        }
+
+        for dependency in app_dependencies {
+            set.insert(ContainerDependency {
+                ecosystem: dependency.ecosystem.to_string(),
+                name: dependency.name.clone(),
+                version: dependency.version.clone(),
+            });
+        }
+
+        set.into_iter().collect()
     }
 
     fn extract_alpine_packages(&self, rootfs_path: &Path) -> Result<Vec<OsDependency>, EngineError> {
@@ -823,4 +907,22 @@ fn looks_distroless(rootfs_path: &Path) -> bool {
     let has_shell = rootfs_path.join("bin/sh").exists() || rootfs_path.join("usr/bin/sh").exists();
 
     !has_common_package_managers && !has_shell
+}
+
+fn dedupe_sca_dependencies(dependencies: Vec<ScaDependency>) -> Vec<ScaDependency> {
+    let mut seen = BTreeSet::new();
+    let mut output = Vec::new();
+
+    for dependency in dependencies {
+        let key = (
+            dependency.ecosystem.to_string(),
+            dependency.name.clone(),
+            dependency.version.clone(),
+        );
+        if seen.insert(key) {
+            output.push(dependency);
+        }
+    }
+
+    output
 }
