@@ -47,6 +47,13 @@ pub struct RootFs {
     pub path: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OsDependency {
+    pub ecosystem: String,
+    pub name: String,
+    pub version: String,
+}
+
 #[derive(Debug)]
 struct AcquiredImage {
     source_mode: ImageSourceMode,
@@ -115,10 +122,11 @@ impl ScanEngine for ContainerEngine {
     fn scan(&self, input: ScanInput) -> Result<ScanResult, EngineError> {
         let acquired = self.acquire_image(input)?;
         let rootfs = self.build_rootfs(&acquired.image_extract_path)?;
-        let _distro = self.detect_distro(&rootfs.path);
+        let distro = self.detect_distro(&rootfs.path);
+        let os_dependencies = self.extract_os_dependencies(&rootfs.path, distro)?;
 
         let _ = &self.sca_engine;
-        let _ = rootfs.path;
+        let _ = rootfs.path.as_path();
         let _ = acquired.source_mode;
 
         Ok(ScanResult {
@@ -127,7 +135,7 @@ impl ScanEngine for ContainerEngine {
                 engine: EngineType::Container,
                 engine_name: self.name().to_string(),
                 target: acquired.target_display,
-                total_dependencies: 0,
+                total_dependencies: os_dependencies.len(),
                 total_vulnerabilities: 0,
             },
         })
@@ -358,6 +366,195 @@ impl ContainerEngine {
         }
 
         Distro::Unknown
+    }
+
+    fn extract_os_dependencies(
+        &self,
+        rootfs_path: &Path,
+        distro: Distro,
+    ) -> Result<Vec<OsDependency>, EngineError> {
+        match distro {
+            Distro::Alpine => self.extract_alpine_packages(rootfs_path),
+            Distro::Debian => self.extract_dpkg_packages(rootfs_path, "debian"),
+            Distro::Ubuntu => self.extract_dpkg_packages(rootfs_path, "ubuntu"),
+            Distro::RHEL => self.extract_rhel_packages(rootfs_path),
+            Distro::Distroless | Distro::Unknown => Ok(Vec::new()),
+        }
+    }
+
+    fn extract_alpine_packages(&self, rootfs_path: &Path) -> Result<Vec<OsDependency>, EngineError> {
+        let installed_path = rootfs_path.join("lib/apk/db/installed");
+        if !installed_path.is_file() {
+            return Ok(Vec::new());
+        }
+
+        let contents = fs::read_to_string(&installed_path).map_err(|error| {
+            EngineError::new(format!(
+                "failed to read Alpine package database '{}': {error}",
+                installed_path.display()
+            ))
+        })?;
+
+        let mut dependencies = Vec::new();
+        let mut name: Option<String> = None;
+        let mut version: Option<String> = None;
+
+        for line in contents.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                if let (Some(name), Some(version)) = (name.take(), version.take()) {
+                    dependencies.push(OsDependency {
+                        ecosystem: "alpine".to_string(),
+                        name,
+                        version,
+                    });
+                }
+                continue;
+            }
+
+            if let Some(value) = trimmed.strip_prefix("P:") {
+                name = Some(value.trim().to_string());
+                continue;
+            }
+            if let Some(value) = trimmed.strip_prefix("V:") {
+                version = Some(value.trim().to_string());
+            }
+        }
+
+        if let (Some(name), Some(version)) = (name.take(), version.take()) {
+            dependencies.push(OsDependency {
+                ecosystem: "alpine".to_string(),
+                name,
+                version,
+            });
+        }
+
+        dependencies.sort_by(|a, b| a.name.cmp(&b.name).then(a.version.cmp(&b.version)));
+        dependencies.dedup_by(|a, b| a.name == b.name && a.version == b.version);
+        Ok(dependencies)
+    }
+
+    fn extract_dpkg_packages(
+        &self,
+        rootfs_path: &Path,
+        ecosystem: &str,
+    ) -> Result<Vec<OsDependency>, EngineError> {
+        let status_path = rootfs_path.join("var/lib/dpkg/status");
+        if !status_path.is_file() {
+            return Ok(Vec::new());
+        }
+
+        let contents = fs::read_to_string(&status_path).map_err(|error| {
+            EngineError::new(format!(
+                "failed to read dpkg status database '{}': {error}",
+                status_path.display()
+            ))
+        })?;
+
+        let mut dependencies = Vec::new();
+        let mut name: Option<String> = None;
+        let mut version: Option<String> = None;
+
+        for line in contents.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                if let (Some(name), Some(version)) = (name.take(), version.take()) {
+                    dependencies.push(OsDependency {
+                        ecosystem: ecosystem.to_string(),
+                        name,
+                        version,
+                    });
+                }
+                continue;
+            }
+
+            if let Some(value) = trimmed.strip_prefix("Package:") {
+                name = Some(value.trim().to_string());
+                continue;
+            }
+            if let Some(value) = trimmed.strip_prefix("Version:") {
+                version = Some(value.trim().to_string());
+            }
+        }
+
+        if let (Some(name), Some(version)) = (name.take(), version.take()) {
+            dependencies.push(OsDependency {
+                ecosystem: ecosystem.to_string(),
+                name,
+                version,
+            });
+        }
+
+        dependencies.sort_by(|a, b| a.name.cmp(&b.name).then(a.version.cmp(&b.version)));
+        dependencies.dedup_by(|a, b| a.name == b.name && a.version == b.version);
+        Ok(dependencies)
+    }
+
+    fn extract_rhel_packages(&self, rootfs_path: &Path) -> Result<Vec<OsDependency>, EngineError> {
+        let rpm_db_dir = rootfs_path.join("var/lib/rpm");
+        if !rpm_db_dir.is_dir() {
+            return Ok(Vec::new());
+        }
+
+        let output = Command::new("rpm")
+            .arg("--root")
+            .arg(rootfs_path)
+            .arg("--dbpath")
+            .arg("/var/lib/rpm")
+            .arg("-qa")
+            .arg("--qf")
+            .arg("%{NAME}\t%{VERSION}-%{RELEASE}\n")
+            .output()
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    EngineError::new(
+                        "rhel package extraction requires `rpm` to be installed on the host PATH",
+                    )
+                } else {
+                    EngineError::new(format!("failed to execute rpm query: {error}"))
+                }
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(EngineError::new(format!(
+                "rpm query failed for rootfs '{}': {}",
+                rootfs_path.display(),
+                if stderr.is_empty() {
+                    "unknown rpm error"
+                } else {
+                    &stderr
+                }
+            )));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut dependencies = Vec::new();
+        for line in stdout.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            let Some((name, version)) = trimmed.split_once('\t') else {
+                continue;
+            };
+            let package = name.trim();
+            let package_version = version.trim();
+            if package.is_empty() || package_version.is_empty() {
+                continue;
+            }
+
+            dependencies.push(OsDependency {
+                ecosystem: "rhel".to_string(),
+                name: package.to_string(),
+                version: package_version.to_string(),
+            });
+        }
+
+        dependencies.sort_by(|a, b| a.name.cmp(&b.name).then(a.version.cmp(&b.version)));
+        dependencies.dedup_by(|a, b| a.name == b.name && a.version == b.version);
+        Ok(dependencies)
     }
 
     fn read_manifest_layers(&self, image_extract_path: &Path) -> Result<Vec<PathBuf>, EngineError> {
