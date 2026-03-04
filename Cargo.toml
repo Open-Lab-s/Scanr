@@ -3,5 +3,6 @@ members = [
     "crates/scanr-sca",
     "crates/scanr-cli",
     "crates/scanr-engine",
+    "crates/scanr-container",
 ]
 resolver = "2"
