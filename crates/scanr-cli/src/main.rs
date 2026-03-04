@@ -7,6 +7,8 @@ use serde::Serialize;
 
 mod tui;
 
+const MAX_CACHE_EVENTS_DISPLAY: usize = 25;
+
 #[derive(Debug, Parser)]
 #[command(name = "scanr", about = "Scanr CLI", version)]
 struct Cli {
@@ -248,8 +250,22 @@ async fn main() {
 
                 if !scan_result.cache_events.is_empty() {
                     println!();
-                    for event in &scan_result.cache_events {
+                    for event in scan_result
+                        .cache_events
+                        .iter()
+                        .take(MAX_CACHE_EVENTS_DISPLAY)
+                    {
                         println!("{event}");
+                    }
+                    let remaining = scan_result
+                        .cache_events
+                        .len()
+                        .saturating_sub(MAX_CACHE_EVENTS_DISPLAY);
+                    if remaining > 0 {
+                        println!(
+                            "... and {} more cache events. Use --raw-json for full details.",
+                            remaining
+                        );
                     }
                 }
 

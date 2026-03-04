@@ -5,6 +5,7 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures::stream::{self, StreamExt};
@@ -16,6 +17,7 @@ use scanr_engine::{
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value as JsonValue};
+use tokio::sync::Mutex;
 use tokio::time::sleep;
 use toml::Value as TomlValue;
 
@@ -38,7 +40,7 @@ pub use scanr_engine::Severity;
 pub use trace::{TraceMatch, TraceReport, trace_dependency_paths};
 
 const OSV_QUERY_URL: &str = "https://api.osv.dev/v1/query";
-const OSV_CONCURRENCY_LIMIT: usize = 8;
+const DEFAULT_OSV_CONCURRENCY_LIMIT: usize = 8;
 const OSV_MAX_RETRIES: usize = 4;
 const SUPPORTED_MANIFESTS: [&str; 6] = [
     "package.json",
@@ -1123,35 +1125,38 @@ pub async fn investigate_vulnerabilities_with_options(
         )
     });
 
-    let targets = prepare_vulnerability_targets(dependencies);
-    let queried_dependencies = targets.len();
+    let batches = prepare_vulnerability_target_batches(dependencies);
+    let queried_dependencies = batches
+        .iter()
+        .map(|batch| batch.targets.len())
+        .sum::<usize>();
     let mut failed_queries = 0usize;
     let mut offline_missing = 0usize;
-    let mut vulnerabilities = Vec::new();
-    let mut recommendations = Vec::new();
-    let mut cache_events = Vec::new();
+    let mut vulnerabilities = Vec::with_capacity(queried_dependencies.saturating_mul(2));
+    let mut recommendations = Vec::with_capacity(queried_dependencies);
+    let mut cache_events = Vec::with_capacity(queried_dependencies);
+    let concurrency_limit = osv_concurrency_limit();
 
-    let mut tasks = stream::iter(targets.into_iter().map(|target| {
+    let mut tasks = stream::iter(batches.into_iter().map(|batch| {
         let client = client.clone();
         let cache_manager = cache_manager.clone();
-        async move { fetch_vulnerabilities_for_dependency(&client, target, cache_manager).await }
+        async move { investigate_target_batch(&client, batch, cache_manager).await }
     }))
-    .buffer_unordered(OSV_CONCURRENCY_LIMIT);
+    .buffer_unordered(concurrency_limit);
 
     while let Some(result) = tasks.next().await {
-        match result {
-            Ok(package_result) => {
-                failed_queries += usize::from(package_result.failed_query);
-                offline_missing += usize::from(package_result.offline_missing);
-                if let Some(event) = package_result.cache_event {
-                    cache_events.push(event);
-                }
-                vulnerabilities.extend(package_result.vulnerabilities);
-                if let Some(recommendation) = package_result.recommendation {
-                    recommendations.push(recommendation);
-                }
+        let batch_outcome = result;
+        failed_queries += batch_outcome.failed_queries;
+        for package_result in batch_outcome.results {
+            failed_queries += usize::from(package_result.failed_query);
+            offline_missing += usize::from(package_result.offline_missing);
+            if let Some(event) = package_result.cache_event {
+                cache_events.push(event);
             }
-            Err(_) => failed_queries += 1,
+            vulnerabilities.extend(package_result.vulnerabilities);
+            if let Some(recommendation) = package_result.recommendation {
+                recommendations.push(recommendation);
+            }
         }
     }
 
@@ -1278,6 +1283,11 @@ struct VulnerabilityTarget {
 }
 
 #[derive(Debug)]
+struct VulnerabilityTargetBatch {
+    targets: Vec<VulnerabilityTarget>,
+}
+
+#[derive(Debug)]
 struct PackageInvestigationResult {
     vulnerabilities: Vec<Vulnerability>,
     recommendation: Option<UpgradeRecommendation>,
@@ -1286,9 +1296,17 @@ struct PackageInvestigationResult {
     cache_event: Option<String>,
 }
 
-fn prepare_vulnerability_targets(dependencies: &[Dependency]) -> Vec<VulnerabilityTarget> {
-    let mut targets = Vec::new();
-    let mut seen = BTreeSet::new();
+#[derive(Debug)]
+struct BatchInvestigationOutcome {
+    results: Vec<PackageInvestigationResult>,
+    failed_queries: usize,
+}
+
+fn prepare_vulnerability_target_batches(
+    dependencies: &[Dependency],
+) -> Vec<VulnerabilityTargetBatch> {
+    let mut batches = BTreeMap::<(Ecosystem, String), Vec<VulnerabilityTarget>>::new();
+    let mut seen = HashSet::new();
 
     for dependency in dependencies {
         let Some(version) = parse_semverish(&dependency.version) else {
@@ -1301,20 +1319,36 @@ fn prepare_vulnerability_targets(dependencies: &[Dependency]) -> Vec<Vulnerabili
             dependency.version.clone(),
         );
         if seen.insert(key) {
-            targets.push(VulnerabilityTarget {
+            let target = VulnerabilityTarget {
                 dependency: dependency.clone(),
                 version,
-            });
+            };
+            batches
+                .entry((target.dependency.ecosystem, target.dependency.name.clone()))
+                .or_default()
+                .push(target);
         }
     }
 
-    targets
+    batches
+        .into_values()
+        .map(|targets| VulnerabilityTargetBatch { targets })
+        .collect()
+}
+
+fn osv_concurrency_limit() -> usize {
+    std::env::var("SCANR_OSV_CONCURRENCY")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .map(|value| value.clamp(1, 64))
+        .unwrap_or(DEFAULT_OSV_CONCURRENCY_LIMIT)
 }
 
 async fn fetch_vulnerabilities_for_dependency(
     client: &reqwest::Client,
     target: VulnerabilityTarget,
     cache_manager: Option<CacheManager>,
+    shared_query_payload: Option<Arc<Mutex<Option<JsonValue>>>>,
 ) -> Result<PackageInvestigationResult, ScanError> {
     let offline_mode = cache_manager
         .as_ref()
@@ -1329,8 +1363,18 @@ async fn fetch_vulnerabilities_for_dependency(
 
     let (payload_json, cache_event, offline_missing) = if let Some(cache_manager) = cache_manager {
         match cache_manager
-            .get_or_fetch(&target.dependency, || {
-                query_osv_json_with_retry(client, &request)
+            .get_or_fetch(&target.dependency, || async {
+                if let Some(shared_payload) = &shared_query_payload {
+                    let mut guard = shared_payload.lock().await;
+                    if let Some(payload) = guard.as_ref() {
+                        return Ok(payload.clone());
+                    }
+                    let payload = query_osv_json_with_retry(client, &request).await?;
+                    *guard = Some(payload.clone());
+                    Ok(payload)
+                } else {
+                    query_osv_json_with_retry(client, &request).await
+                }
             })
             .await?
         {
@@ -1362,11 +1406,22 @@ async fn fetch_vulnerabilities_for_dependency(
             }
         }
     } else {
-        (
-            query_osv_json_with_retry(client, &request).await?,
-            None,
-            false,
-        )
+        if let Some(shared_payload) = &shared_query_payload {
+            let mut guard = shared_payload.lock().await;
+            if let Some(payload) = guard.as_ref() {
+                (payload.clone(), None, false)
+            } else {
+                let payload = query_osv_json_with_retry(client, &request).await?;
+                *guard = Some(payload.clone());
+                (payload, None, false)
+            }
+        } else {
+            (
+                query_osv_json_with_retry(client, &request).await?,
+                None,
+                false,
+            )
+        }
     };
 
     let payload = serde_json::from_value::<OsvQueryResponse>(payload_json).map_err(|source| {
@@ -1428,6 +1483,43 @@ async fn fetch_vulnerabilities_for_dependency(
         offline_missing,
         cache_event,
     })
+}
+
+async fn investigate_target_batch(
+    client: &reqwest::Client,
+    batch: VulnerabilityTargetBatch,
+    cache_manager: Option<CacheManager>,
+) -> BatchInvestigationOutcome {
+    let batch_size = batch.targets.len();
+    if batch_size == 0 {
+        return BatchInvestigationOutcome {
+            results: Vec::new(),
+            failed_queries: 0,
+        };
+    }
+
+    let shared_query_payload = Arc::new(Mutex::new(None));
+    let mut results = Vec::with_capacity(batch_size);
+    let mut failed_queries = 0usize;
+
+    for target in batch.targets {
+        match fetch_vulnerabilities_for_dependency(
+            client,
+            target,
+            cache_manager.clone(),
+            Some(shared_query_payload.clone()),
+        )
+        .await
+        {
+            Ok(result) => results.push(result),
+            Err(_) => failed_queries += 1,
+        }
+    }
+
+    BatchInvestigationOutcome {
+        results,
+        failed_queries,
+    }
 }
 
 async fn query_osv_json_with_retry(

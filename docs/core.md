@@ -2,6 +2,39 @@
 
 `scanr-sca` is the SCA engine implementation used by `scanr-cli`.
 
+## Which Crate Should I Use?
+
+- Use `scanr-cli` if you want the ready-to-run `scanr` command.
+- Use `scanr-sca` if you are embedding SCA logic in a Rust application.
+- Use `scanr-engine` if you are implementing custom engines with shared contracts.
+
+Published crates:
+
+- `https://crates.io/crates/scanr-cli`
+- `https://crates.io/crates/scanr-sca`
+- `https://crates.io/crates/scanr-engine`
+
+Add `scanr-sca` for integration:
+
+```bash
+cargo add scanr-sca
+```
+
+Minimal async usage:
+
+```rust
+use std::path::Path;
+use scanr_sca::ScaEngine;
+
+#[tokio::main]
+async fn main() -> Result<(), scanr_sca::ScanError> {
+    let engine = ScaEngine::new();
+    let result = engine.scan_detailed(Path::new(".")).await?;
+    println!("dependencies: {}", result.total_dependencies);
+    Ok(())
+}
+```
+
 ## Responsibilities
 
 - Parse dependencies from supported manifest formats

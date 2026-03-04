@@ -4,6 +4,11 @@ version = "0.1.1"
 edition = "2024"
 description = "Scanr engine abstraction contracts"
 license = "Apache-2.0"
+repository = "https://github.com/Open-Lab-s/Scanr"
+homepage = "https://scanr.dev"
+readme = "../../README.md"
+keywords = ["security", "devsecops", "engine", "scanr"]
+categories = ["development-tools"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }

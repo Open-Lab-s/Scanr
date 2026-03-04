@@ -30,16 +30,36 @@ Tap repository:
 
 - `https://github.com/Open-Lab-s/homebrew-tap`
 
-## Cargo (source install)
+## Cargo (crates.io)
 
 ```bash
-cargo install --path crates/scanr-cli
+cargo install scanr-cli --locked
 ```
 
-For local workspace development:
+Crates page:
+
+- `https://crates.io/crates/scanr-cli`
+
+## Published Rust Crates
+
+| Crate | Purpose | Typical user |
+| --- | --- | --- |
+| `scanr-cli` | Installs the `scanr` command-line interface | CLI users, CI pipelines |
+| `scanr-sca` | SCA engine library (dependency parsing + vuln resolution) | Rust app integrators |
+| `scanr-engine` | Engine abstraction contracts (`ScanEngine`, `Finding`, `ScanResult`) | Engine/plugin developers |
+
+Add library crates to your Rust project:
+
+```bash
+cargo add scanr-sca
+cargo add scanr-engine
+```
+
+For local workspace development/testing:
 
 ```bash
 cargo build --workspace --release
+cargo install --path crates/scanr-cli --force
 ```
 
 ## curl Installer
