@@ -585,10 +585,7 @@ async fn main() {
             println!("Engine: {}", result.metadata.engine_name);
             println!("Target: {}", result.metadata.target);
             println!("Status: placeholder implementation (C1 skeleton)");
-            println!(
-                "OS dependencies extracted: {}",
-                result.metadata.total_dependencies
-            );
+            println!("Dependencies discovered: {}", result.metadata.total_dependencies);
             println!("Findings: {}", result.findings.len());
         }
         Some(Commands::Sbom { command }) => match command {
