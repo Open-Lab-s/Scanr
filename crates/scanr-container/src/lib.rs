@@ -6,7 +6,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use scanr_engine::{EngineError, EngineType, ScanEngine, ScanInput, ScanMetadata, ScanResult};
-use scanr_sca::{Dependency as ScaDependency, ScaEngine};
+use scanr_sca::{Dependency as ScaDependency, Ecosystem as ScaEcosystem, ScaEngine};
 use serde::Deserialize;
 use tempfile::TempDir;
 use walkdir::WalkDir;
@@ -54,13 +54,6 @@ pub struct OsDependency {
     pub ecosystem: String,
     pub name: String,
     pub version: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct ContainerDependency {
-    ecosystem: String,
-    name: String,
-    version: String,
 }
 
 #[derive(Debug)]
@@ -138,22 +131,27 @@ impl ScanEngine for ContainerEngine {
         let acquired = self.acquire_image(input)?;
         let rootfs = self.build_rootfs(&acquired.image_extract_path)?;
         let distro = self.detect_distro(&rootfs.path);
-        let os_dependencies = self.extract_os_dependencies(&rootfs.path, distro)?;
-        let app_dependencies = self.discover_application_dependencies(&rootfs.path)?;
-        let merged_dependencies = self.merge_dependencies(&os_dependencies, &app_dependencies);
-
-        let _ = &self.sca_engine;
-        let _ = rootfs.path.as_path();
+        let dependencies = self.collect_all_dependencies(&rootfs.path, distro)?;
+        let sca_result = self.resolve_with_sca_dependencies(
+            dependencies,
+            &acquired.target_display,
+            &rootfs.path,
+        )?;
+        let mut findings = scanr_sca::findings_from_scan_result(&sca_result);
+        for finding in &mut findings {
+            finding.engine = EngineType::Container;
+            finding.location = Some(acquired.target_display.clone());
+        }
         let _ = acquired.source_mode;
 
         Ok(ScanResult {
-            findings: Vec::new(),
+            findings,
             metadata: ScanMetadata {
                 engine: EngineType::Container,
                 engine_name: self.name().to_string(),
-                target: acquired.target_display,
-                total_dependencies: merged_dependencies.len(),
-                total_vulnerabilities: 0,
+                target: acquired.target_display.clone(),
+                total_dependencies: sca_result.total_dependencies as usize,
+                total_vulnerabilities: sca_result.vulnerabilities.len(),
             },
         })
     }
@@ -399,6 +397,33 @@ impl ContainerEngine {
         }
     }
 
+    fn collect_all_dependencies(
+        &self,
+        rootfs_path: &Path,
+        distro: Distro,
+    ) -> Result<Vec<ScaDependency>, EngineError> {
+        let os_dependencies = self.extract_os_dependencies(rootfs_path, distro)?;
+        let app_dependencies = self.discover_application_dependencies(rootfs_path)?;
+
+        let mut merged = app_dependencies;
+        for dependency in os_dependencies {
+            let ecosystem = ecosystem_from_os_label(&dependency.ecosystem).ok_or_else(|| {
+                EngineError::new(format!(
+                    "unsupported OS ecosystem mapping '{}'",
+                    dependency.ecosystem
+                ))
+            })?;
+            merged.push(ScaDependency {
+                ecosystem,
+                name: dependency.name,
+                version: dependency.version,
+                direct: false,
+            });
+        }
+
+        Ok(dedupe_sca_dependencies(merged))
+    }
+
     fn discover_application_dependencies(
         &self,
         rootfs_path: &Path,
@@ -440,30 +465,28 @@ impl ContainerEngine {
         manifests
     }
 
-    fn merge_dependencies(
+    fn resolve_with_sca_dependencies(
         &self,
-        os_dependencies: &[OsDependency],
-        app_dependencies: &[ScaDependency],
-    ) -> Vec<ContainerDependency> {
-        let mut set = BTreeSet::new();
+        dependencies: Vec<ScaDependency>,
+        target: &str,
+        rootfs_path: &Path,
+    ) -> Result<scanr_sca::ScanResult, EngineError> {
+        let query_options = scanr_sca::VulnerabilityQueryOptions {
+            cache_base_path: Some(rootfs_path.to_path_buf()),
+            cache_enabled: false,
+            cache_ttl_hours: 24,
+            offline: false,
+            force_refresh: false,
+        };
 
-        for dependency in os_dependencies {
-            set.insert(ContainerDependency {
-                ecosystem: dependency.ecosystem.clone(),
-                name: dependency.name.clone(),
-                version: dependency.version.clone(),
-            });
-        }
-
-        for dependency in app_dependencies {
-            set.insert(ContainerDependency {
-                ecosystem: dependency.ecosystem.to_string(),
-                name: dependency.name.clone(),
-                version: dependency.version.clone(),
-            });
-        }
-
-        set.into_iter().collect()
+        self.sca_engine
+            .resolve_dependencies_with_query_options(
+                dependencies,
+                query_options,
+                target.to_string(),
+                rootfs_path.display().to_string(),
+            )
+            .map_err(|error| EngineError::new(format!("sca dependency resolution failed: {error}")))
     }
 
     fn extract_alpine_packages(&self, rootfs_path: &Path) -> Result<Vec<OsDependency>, EngineError> {
@@ -907,6 +930,16 @@ fn looks_distroless(rootfs_path: &Path) -> bool {
     let has_shell = rootfs_path.join("bin/sh").exists() || rootfs_path.join("usr/bin/sh").exists();
 
     !has_common_package_managers && !has_shell
+}
+
+fn ecosystem_from_os_label(label: &str) -> Option<ScaEcosystem> {
+    match label.to_ascii_lowercase().as_str() {
+        "alpine" => Some(ScaEcosystem::Alpine),
+        "debian" => Some(ScaEcosystem::Debian),
+        "ubuntu" => Some(ScaEcosystem::Ubuntu),
+        "rhel" => Some(ScaEcosystem::Rhel),
+        _ => None,
+    }
 }
 
 fn dedupe_sca_dependencies(dependencies: Vec<ScaDependency>) -> Vec<ScaDependency> {

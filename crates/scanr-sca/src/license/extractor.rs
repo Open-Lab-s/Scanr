@@ -36,7 +36,12 @@ pub fn extract_licenses_for_dependencies(
                         resolved
                     })
                     .unwrap_or_else(|| "UNKNOWN".to_string()),
-                Ecosystem::Python | Ecosystem::Rust => "UNKNOWN".to_string(),
+                Ecosystem::Python
+                | Ecosystem::Rust
+                | Ecosystem::Alpine
+                | Ecosystem::Debian
+                | Ecosystem::Ubuntu
+                | Ecosystem::Rhel => "UNKNOWN".to_string(),
             };
 
             LicenseInfo {

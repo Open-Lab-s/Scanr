@@ -70,6 +70,42 @@ impl ScaEngine {
     ) -> Result<ScanResult, ScanError> {
         scan_path_with_options(path, options).await
     }
+
+    pub fn resolve_dependencies(&self, dependencies: Vec<Dependency>) -> Result<ScanResult, ScanError> {
+        self.resolve_dependencies_with_query_options(
+            dependencies,
+            VulnerabilityQueryOptions::default(),
+            "dependency-set".to_string(),
+            "container://dependency-set".to_string(),
+        )
+    }
+
+    pub fn resolve_dependencies_with_query_options(
+        &self,
+        dependencies: Vec<Dependency>,
+        options: VulnerabilityQueryOptions,
+        target: String,
+        path: String,
+    ) -> Result<ScanResult, ScanError> {
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            return tokio::task::block_in_place(|| {
+                handle.block_on(resolve_dependencies_with_options(
+                    dependencies, &options, target, path,
+                ))
+            });
+        }
+
+        let runtime = tokio::runtime::Runtime::new().map_err(|source| ScanError::Io {
+            path: PathBuf::from("tokio-runtime"),
+            source: std::io::Error::other(format!("failed to create tokio runtime: {source}")),
+        })?;
+        runtime.block_on(resolve_dependencies_with_options(
+            dependencies,
+            &options,
+            target,
+            path,
+        ))
+    }
 }
 
 impl ScanEngine for ScaEngine {
@@ -112,6 +148,10 @@ pub enum Ecosystem {
     Node,
     Python,
     Rust,
+    Alpine,
+    Debian,
+    Ubuntu,
+    Rhel,
 }
 
 impl Display for Ecosystem {
@@ -120,6 +160,10 @@ impl Display for Ecosystem {
             Self::Node => write!(f, "node"),
             Self::Python => write!(f, "python"),
             Self::Rust => write!(f, "rust"),
+            Self::Alpine => write!(f, "alpine"),
+            Self::Debian => write!(f, "debian"),
+            Self::Ubuntu => write!(f, "ubuntu"),
+            Self::Rhel => write!(f, "rhel"),
         }
     }
 }
@@ -719,9 +763,23 @@ pub async fn scan_path_with_options(
         force_refresh: options.force_refresh,
     };
 
+    resolve_dependencies_with_options(
+        dependencies,
+        &vulnerability_options,
+        target,
+        display_path,
+    )
+    .await
+}
+
+pub async fn resolve_dependencies_with_options(
+    dependencies: Vec<Dependency>,
+    options: &VulnerabilityQueryOptions,
+    target: String,
+    path: String,
+) -> Result<ScanResult, ScanError> {
     let (vulnerability_report, lookup_error) =
-        match investigate_vulnerabilities_with_options(&dependencies, &vulnerability_options).await
-        {
+        match investigate_vulnerabilities_with_options(&dependencies, options).await {
             Ok(report) => (report, None),
             Err(error) => (
                 VulnerabilityReport {
@@ -735,6 +793,23 @@ pub async fn scan_path_with_options(
                 Some(error.to_string()),
             ),
         };
+
+    Ok(build_scan_result_from_dependencies(
+        target,
+        path,
+        dependencies,
+        vulnerability_report,
+        lookup_error,
+    ))
+}
+
+fn build_scan_result_from_dependencies(
+    target: String,
+    path: String,
+    dependencies: Vec<Dependency>,
+    vulnerability_report: VulnerabilityReport,
+    lookup_error: Option<String>,
+) -> ScanResult {
     let risk_summary = summarize_risk(&vulnerability_report.vulnerabilities);
     let severity_summary = SeveritySummary {
         critical: to_u32(risk_summary.counts.critical),
@@ -745,9 +820,9 @@ pub async fn scan_path_with_options(
     };
     let risk_score = calculate_risk_score(&severity_summary);
 
-    Ok(ScanResult {
+    ScanResult {
         target,
-        path: display_path,
+        path,
         total_dependencies: to_u32(dependencies.len()),
         dependencies,
         vulnerabilities: vulnerability_report.vulnerabilities,
@@ -760,7 +835,7 @@ pub async fn scan_path_with_options(
         offline_missing: to_u32(vulnerability_report.offline_missing),
         lookup_error,
         cache_events: vulnerability_report.cache_events,
-    })
+    }
 }
 
 fn convert_to_engine_scan_result(scan_result: &ScanResult) -> EngineScanResult {
@@ -1279,7 +1354,7 @@ fn resolve_scan_root(target_path: &Path) -> PathBuf {
 #[derive(Debug, Clone)]
 struct VulnerabilityTarget {
     dependency: Dependency,
-    version: Version,
+    parsed_version: Option<Version>,
 }
 
 #[derive(Debug)]
@@ -1309,10 +1384,6 @@ fn prepare_vulnerability_target_batches(
     let mut seen = HashSet::new();
 
     for dependency in dependencies {
-        let Some(version) = parse_semverish(&dependency.version) else {
-            continue;
-        };
-
         let key = (
             dependency.ecosystem,
             dependency.name.clone(),
@@ -1321,7 +1392,7 @@ fn prepare_vulnerability_target_batches(
         if seen.insert(key) {
             let target = VulnerabilityTarget {
                 dependency: dependency.clone(),
-                version,
+                parsed_version: parse_semverish(&dependency.version),
             };
             batches
                 .entry((target.dependency.ecosystem, target.dependency.name.clone()))
@@ -1433,7 +1504,11 @@ async fn fetch_vulnerabilities_for_dependency(
 
     let mut vulnerabilities = Vec::new();
     for vuln in &payload.vulns {
-        if !vulnerability_applies_to_dependency(&vuln, &target.dependency, &target.version) {
+        if !vulnerability_applies_to_dependency(
+            &vuln,
+            &target.dependency,
+            target.parsed_version.as_ref(),
+        ) {
             continue;
         }
 
@@ -1570,6 +1645,10 @@ async fn recommend_safe_upgrade(
         return Ok(None);
     }
 
+    let Some(target_version) = target.parsed_version.as_ref() else {
+        return Ok(None);
+    };
+
     let registry_versions = if allow_registry_fetch {
         fetch_registry_versions(client, target.dependency.ecosystem, &target.dependency.name)
             .await?
@@ -1584,11 +1663,11 @@ async fn recommend_safe_upgrade(
     candidates.sort_by(|(_, left), (_, right)| left.cmp(right));
 
     let suggested = candidates.into_iter().find(|(_raw, parsed)| {
-        parsed >= &target.version
+        parsed >= target_version
             && !version_is_vulnerable_for_dependency(
                 package_vulns,
                 &target.dependency,
-                parsed,
+                Some(parsed),
                 &target.dependency.version,
             )
     });
@@ -1614,7 +1693,7 @@ async fn recommend_safe_upgrade(
         ecosystem: target.dependency.ecosystem,
         current_version: target.dependency.version.clone(),
         suggested_version: suggested_raw,
-        major_bump: suggested_parsed.major > target.version.major,
+        major_bump: suggested_parsed.major > target_version.major,
     }))
 }
 
@@ -1645,7 +1724,11 @@ async fn fetch_registry_versions(
                 .unwrap_or_default();
             Ok(versions)
         }
-        Ecosystem::Rust => Ok(Vec::new()),
+        Ecosystem::Rust
+        | Ecosystem::Alpine
+        | Ecosystem::Debian
+        | Ecosystem::Ubuntu
+        | Ecosystem::Rhel => Ok(Vec::new()),
     }
 }
 
@@ -1711,7 +1794,7 @@ fn is_retryable_error(error: &reqwest::Error) -> bool {
 fn vulnerability_applies_to_dependency(
     vulnerability: &OsvVulnerability,
     dependency: &Dependency,
-    dependency_version: &Version,
+    dependency_version: Option<&Version>,
 ) -> bool {
     for affected in &vulnerability.affected {
         if let Some(package) = &affected.package {
@@ -1738,7 +1821,7 @@ fn vulnerability_applies_to_dependency(
 fn version_is_vulnerable_for_dependency(
     vulnerabilities: &[OsvVulnerability],
     dependency: &Dependency,
-    candidate_version: &Version,
+    candidate_version: Option<&Version>,
     candidate_raw: &str,
 ) -> bool {
     vulnerabilities.iter().any(|vulnerability| {
@@ -1763,15 +1846,17 @@ fn version_is_vulnerable_for_dependency(
 
 fn affected_versions_match(
     affected: &OsvAffected,
-    dependency_version: &Version,
+    dependency_version: Option<&Version>,
     raw_dependency_version: &str,
 ) -> bool {
     for explicit in &affected.versions {
         if explicit == raw_dependency_version {
             return true;
         }
-        if let Some(parsed) = parse_semverish(explicit) {
-            if &parsed == dependency_version {
+        if let (Some(parsed_dependency_version), Some(parsed)) =
+            (dependency_version, parse_semverish(explicit))
+        {
+            if &parsed == parsed_dependency_version {
                 return true;
             }
         }
@@ -1779,8 +1864,9 @@ fn affected_versions_match(
 
     for range in &affected.ranges {
         let kind = range.kind.to_ascii_uppercase();
-        if (kind == "SEMVER" || kind == "ECOSYSTEM")
-            && version_matches_range_events(dependency_version, &range.events)
+        if let Some(parsed_dependency_version) = dependency_version
+            && (kind == "SEMVER" || kind == "ECOSYSTEM")
+            && version_matches_range_events(parsed_dependency_version, &range.events)
         {
             return true;
         }
@@ -1979,6 +2065,10 @@ fn package_url(dependency: &Dependency) -> String {
         Ecosystem::Node => "npm",
         Ecosystem::Python => "pypi",
         Ecosystem::Rust => "cargo",
+        Ecosystem::Alpine => "apk",
+        Ecosystem::Debian => "deb",
+        Ecosystem::Ubuntu => "deb",
+        Ecosystem::Rhel => "rpm",
     };
     let name = encode_purl_name(&dependency.name);
     let version = encode_purl_segment(&dependency.version);
@@ -2000,6 +2090,9 @@ fn parse_purl_dependency(purl: &str) -> Option<(Ecosystem, String, Option<String
         "npm" => Ecosystem::Node,
         "pypi" => Ecosystem::Python,
         "cargo" | "crates.io" => Ecosystem::Rust,
+        "apk" => Ecosystem::Alpine,
+        "deb" => Ecosystem::Debian,
+        "rpm" => Ecosystem::Rhel,
         _ => return None,
     };
 
@@ -2190,6 +2283,10 @@ fn osv_ecosystem(ecosystem: Ecosystem) -> &'static str {
         Ecosystem::Node => "npm",
         Ecosystem::Python => "PyPI",
         Ecosystem::Rust => "crates.io",
+        Ecosystem::Alpine => "Alpine",
+        Ecosystem::Debian => "Debian",
+        Ecosystem::Ubuntu => "Ubuntu",
+        Ecosystem::Rhel => "Red Hat",
     }
 }
 
