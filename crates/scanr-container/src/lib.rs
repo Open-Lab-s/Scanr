@@ -20,12 +20,26 @@ impl ContainerEngine {
             sca_engine: ScaEngine::new(),
         }
     }
+
+    pub fn detect_distro_for_rootfs(&self, rootfs_path: &Path) -> Distro {
+        self.detect_distro(rootfs_path)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
 enum ImageSourceMode {
     Docker,
     Tar,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Distro {
+    Alpine,
+    Debian,
+    Ubuntu,
+    RHEL,
+    Distroless,
+    Unknown,
 }
 
 #[derive(Debug)]
@@ -101,6 +115,7 @@ impl ScanEngine for ContainerEngine {
     fn scan(&self, input: ScanInput) -> Result<ScanResult, EngineError> {
         let acquired = self.acquire_image(input)?;
         let rootfs = self.build_rootfs(&acquired.image_extract_path)?;
+        let _distro = self.detect_distro(&rootfs.path);
 
         let _ = &self.sca_engine;
         let _ = rootfs.path;
@@ -304,6 +319,45 @@ impl ContainerEngine {
         }
 
         Ok(RootFs { path: rootfs_path })
+    }
+
+    fn detect_distro(&self, rootfs_path: &Path) -> Distro {
+        let etc_path = rootfs_path.join("etc");
+
+        if etc_path.join("alpine-release").is_file() {
+            return Distro::Alpine;
+        }
+
+        let os_release_path = etc_path.join("os-release");
+        if os_release_path.is_file()
+            && let Ok(contents) = fs::read_to_string(&os_release_path)
+        {
+            let id = parse_os_release_value(&contents, "ID").unwrap_or_default();
+            let id_like = parse_os_release_value(&contents, "ID_LIKE").unwrap_or_default();
+
+            if id == "alpine" || id_like.contains("alpine") {
+                return Distro::Alpine;
+            }
+            if id == "ubuntu" || id_like.contains("ubuntu") {
+                return Distro::Ubuntu;
+            }
+            if id == "debian" || id_like.contains("debian") {
+                return Distro::Debian;
+            }
+            if is_rhel_family(&id) || is_rhel_family(&id_like) {
+                return Distro::RHEL;
+            }
+        }
+
+        if etc_path.join("debian_version").is_file() {
+            return Distro::Debian;
+        }
+
+        if looks_distroless(rootfs_path) {
+            return Distro::Distroless;
+        }
+
+        Distro::Unknown
     }
 
     fn read_manifest_layers(&self, image_extract_path: &Path) -> Result<Vec<PathBuf>, EngineError> {
@@ -514,4 +568,62 @@ fn remove_fs_path(path: PathBuf) -> Result<(), EngineError> {
     }
 
     Ok(())
+}
+
+fn parse_os_release_value(contents: &str, key: &str) -> Option<String> {
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        let (lhs, rhs) = trimmed.split_once('=')?;
+        if lhs.trim() != key {
+            continue;
+        }
+
+        let mut value = rhs.trim().to_ascii_lowercase();
+        if value.starts_with('"') && value.ends_with('"') && value.len() >= 2 {
+            value = value[1..value.len() - 1].to_string();
+        }
+
+        return Some(value);
+    }
+    None
+}
+
+fn is_rhel_family(value: &str) -> bool {
+    value
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .any(|token| {
+            matches!(
+                token,
+                "rhel" | "centos" | "fedora" | "rocky" | "almalinux" | "ol"
+            )
+        })
+}
+
+fn looks_distroless(rootfs_path: &Path) -> bool {
+    let etc_path = rootfs_path.join("etc");
+    if !etc_path.is_dir() {
+        return false;
+    }
+
+    let has_os_markers = etc_path.join("os-release").is_file()
+        || etc_path.join("alpine-release").is_file()
+        || etc_path.join("debian_version").is_file();
+    if has_os_markers {
+        return false;
+    }
+
+    let has_common_package_managers = rootfs_path.join("sbin/apk").exists()
+        || rootfs_path.join("usr/bin/apt").exists()
+        || rootfs_path.join("usr/bin/apt-get").exists()
+        || rootfs_path.join("usr/bin/dnf").exists()
+        || rootfs_path.join("usr/bin/yum").exists()
+        || rootfs_path.join("usr/bin/rpm").exists();
+    let has_shell = rootfs_path.join("bin/sh").exists() || rootfs_path.join("usr/bin/sh").exists();
+
+    !has_common_package_managers && !has_shell
 }
