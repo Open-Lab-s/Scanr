@@ -2,6 +2,24 @@
 
 `scanr-cli` is the executable crate that exposes the `scanr` command.
 
+## Which Crate Should I Use?
+
+- `scanr-cli`: install and run `scanr` as an end user.
+- `scanr-sca`: embed Scanr SCA scanning in your Rust app.
+- `scanr-engine`: build custom engines on Scanr contracts (`ScanEngine`, `Finding`, `ScanResult`).
+
+Published crates:
+
+- `https://crates.io/crates/scanr-cli`
+- `https://crates.io/crates/scanr-sca`
+- `https://crates.io/crates/scanr-engine`
+
+CLI install:
+
+```bash
+cargo install scanr-cli --locked
+```
+
 ## Command Tree
 
 ```bash

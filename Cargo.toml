@@ -1,7 +1,7 @@
 [workspace]
 members = [
-    "crates/scanr-core",
+    "crates/scanr-sca",
     "crates/scanr-cli",
+    "crates/scanr-engine",
 ]
 resolver = "2"
-

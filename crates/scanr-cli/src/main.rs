@@ -7,6 +7,8 @@ use serde::Serialize;
 
 mod tui;
 
+const MAX_CACHE_EVENTS_DISPLAY: usize = 25;
+
 #[derive(Debug, Parser)]
 #[command(name = "scanr", about = "Scanr CLI", version)]
 struct Cli {
@@ -123,16 +125,16 @@ struct ScanRawOutput {
     offline_missing: usize,
     lookup_error: Option<String>,
     cache_events: Vec<String>,
-    risk_summary: scanr_core::RiskSummary,
+    risk_summary: scanr_sca::RiskSummary,
     policy_path: Option<String>,
-    policy: Option<scanr_core::PolicyConfig>,
-    policy_evaluation: Option<scanr_core::PolicyEvaluation>,
-    license_policy: scanr_core::LicensePolicy,
-    license_evaluation: scanr_core::LicenseEvaluationResult,
+    policy: Option<scanr_sca::PolicyConfig>,
+    policy_evaluation: Option<scanr_engine::PolicyEvaluation>,
+    license_policy: scanr_sca::LicensePolicy,
+    license_evaluation: scanr_sca::LicenseEvaluationResult,
     baseline: Option<BaselineSummaryOutput>,
-    dependencies: Vec<scanr_core::Dependency>,
-    vulnerabilities: Vec<scanr_core::Vulnerability>,
-    upgrade_recommendations: Vec<scanr_core::UpgradeRecommendation>,
+    dependencies: Vec<scanr_sca::Dependency>,
+    vulnerabilities: Vec<scanr_sca::Vulnerability>,
+    upgrade_recommendations: Vec<scanr_sca::UpgradeRecommendation>,
 }
 
 #[derive(Debug, Serialize)]
@@ -147,7 +149,7 @@ struct BaselineSummaryOutput {
     current_vulnerabilities: usize,
     new_vulnerabilities: usize,
     fixed_vulnerabilities: usize,
-    new_severity: scanr_core::SeverityCounts,
+    new_severity: scanr_sca::SeverityCounts,
 }
 
 #[tokio::main]
@@ -174,7 +176,7 @@ async fn main() {
             refresh,
             recursive: _,
         }) => {
-            let loaded_policy = scanr_core::load_policy_for_target(&path);
+            let loaded_policy = scanr_sca::load_policy_for_target(&path);
             let cache_settings = match &loaded_policy {
                 Ok((policy, _)) => (policy.cache_enabled, policy.cache_ttl_hours),
                 Err(error) => {
@@ -185,14 +187,18 @@ async fn main() {
                 }
             };
 
-            let scan_options = scanr_core::ScanOptions {
+            let scan_options = scanr_sca::ScanOptions {
                 cache_enabled: cache_settings.0,
                 cache_ttl_hours: cache_settings.1,
                 offline,
                 force_refresh: refresh,
             };
+            let sca_engine = scanr_sca::ScaEngine::new();
 
-            let scan_result = match scanr_core::scan_path_with_options(&path, &scan_options).await {
+            let scan_result = match sca_engine
+                .scan_detailed_with_options(&path, &scan_options)
+                .await
+            {
                 Ok(scan_result) => scan_result,
                 Err(error) => {
                     eprintln!("Scan failed: {error}");
@@ -204,9 +210,9 @@ async fn main() {
                 .as_ref()
                 .map(|(policy, _)| policy.clone())
                 .unwrap_or_default();
-            let license_info = scanr_core::extract_licenses(&path, &scan_result.dependencies);
+            let license_info = scanr_sca::extract_licenses(&path, &scan_result.dependencies);
             let license_evaluation =
-                scanr_core::evaluate_licenses(&license_info, &effective_policy.license);
+                scanr_sca::evaluate_licenses(&license_info, &effective_policy.license);
             let license_failed_in_ci = ci
                 && effective_policy.license.enforce_in_ci
                 && !license_evaluation.violations.is_empty();
@@ -223,7 +229,7 @@ async fn main() {
             }
 
             if sarif {
-                let sarif_report = scanr_core::scan_result_to_sarif(&scan_result);
+                let sarif_report = scanr_sca::scan_result_to_sarif(&scan_result);
                 match serde_json::to_string_pretty(&sarif_report) {
                     Ok(payload) => println!("{payload}"),
                     Err(error) => {
@@ -244,8 +250,22 @@ async fn main() {
 
                 if !scan_result.cache_events.is_empty() {
                     println!();
-                    for event in &scan_result.cache_events {
+                    for event in scan_result
+                        .cache_events
+                        .iter()
+                        .take(MAX_CACHE_EVENTS_DISPLAY)
+                    {
                         println!("{event}");
+                    }
+                    let remaining = scan_result
+                        .cache_events
+                        .len()
+                        .saturating_sub(MAX_CACHE_EVENTS_DISPLAY);
+                    if remaining > 0 {
+                        println!(
+                            "... and {} more cache events. Use --raw-json for full details.",
+                            remaining
+                        );
                     }
                 }
 
@@ -324,12 +344,12 @@ async fn main() {
             let mut baseline_delta = None;
 
             if baseline {
-                let baseline_path = scanr_core::baseline_path_for_target(&path);
+                let baseline_path = scanr_sca::baseline_path_for_target(&path);
                 let baseline_path_display =
                     normalize_windows_verbatim_path(baseline_path.display().to_string());
-                match scanr_core::load_baseline_for_target(&path) {
+                match scanr_sca::load_baseline_for_target(&path) {
                     Ok(Some((loaded_baseline, loaded_baseline_path))) => {
-                        let delta = scanr_core::compare_scan_result_to_baseline(
+                        let delta = scanr_sca::compare_scan_result_to_baseline(
                             &scan_result,
                             &loaded_baseline,
                         );
@@ -337,7 +357,7 @@ async fn main() {
                             loaded_baseline_path.display().to_string(),
                         );
                         let version_mismatch =
-                            loaded_baseline.version != scanr_core::current_scanr_version();
+                            loaded_baseline.version != scanr_sca::current_scanr_version();
 
                         println!();
                         println!("Baseline Comparison");
@@ -346,7 +366,7 @@ async fn main() {
                             eprintln!(
                                 "Warning: baseline version '{}' differs from current Scanr '{}'.",
                                 loaded_baseline.version,
-                                scanr_core::current_scanr_version()
+                                scanr_sca::current_scanr_version()
                             );
                         }
                         println!("Baseline: {} vulnerabilities", delta.baseline_total);
@@ -374,7 +394,7 @@ async fn main() {
                             found: true,
                             path: loaded_path_display,
                             baseline_version: Some(loaded_baseline.version.clone()),
-                            current_scanr_version: scanr_core::current_scanr_version().to_string(),
+                            current_scanr_version: scanr_sca::current_scanr_version().to_string(),
                             version_mismatch,
                             baseline_vulnerabilities: delta.baseline_total,
                             current_vulnerabilities: delta.current_total,
@@ -396,13 +416,13 @@ async fn main() {
                             found: false,
                             path: baseline_path_display,
                             baseline_version: None,
-                            current_scanr_version: scanr_core::current_scanr_version().to_string(),
+                            current_scanr_version: scanr_sca::current_scanr_version().to_string(),
                             version_mismatch: false,
                             baseline_vulnerabilities: 0,
                             current_vulnerabilities: 0,
                             new_vulnerabilities: 0,
                             fixed_vulnerabilities: 0,
-                            new_severity: scanr_core::SeverityCounts::default(),
+                            new_severity: scanr_sca::SeverityCounts::default(),
                         });
                     }
                     Err(error) => {
@@ -452,9 +472,15 @@ async fn main() {
                                 loaded_policy.max_critical, loaded_policy.max_high
                             );
 
-                            let risk_summary = risk_summary_from_scan_result(&scan_result);
-                            let evaluation =
-                                scanr_core::evaluate_policy(&risk_summary, &loaded_policy);
+                            let findings = scanr_sca::findings_from_scan_result(&scan_result);
+                            let policy_input = scanr_engine::VulnerabilityPolicy {
+                                max_critical: loaded_policy.max_critical,
+                                max_high: loaded_policy.max_high,
+                            };
+                            let evaluation = scanr_engine::evaluate_vulnerability_policy(
+                                &findings,
+                                &policy_input,
+                            );
                             if evaluation.passed {
                                 println!("Result: PASS");
                             } else {
@@ -489,12 +515,7 @@ async fn main() {
             }
 
             let final_ci_exit_code = if ci {
-                match (vulnerability_failed_in_ci, license_failed_in_ci) {
-                    (false, false) => 0,
-                    (true, false) => 2,
-                    (false, true) => 3,
-                    (true, true) => 4,
-                }
+                scanr_engine::resolve_exit_code(vulnerability_failed_in_ci, license_failed_in_ci)
             } else {
                 0
             };
@@ -539,7 +560,7 @@ async fn main() {
         }
         Some(Commands::Sbom { command }) => match command {
             SbomCommands::Generate { path, output } => {
-                match scanr_core::generate_cyclonedx_sbom(&path) {
+                match scanr_sca::generate_cyclonedx_sbom(&path) {
                     Ok(sbom) => {
                         if let Some(parent) = output.parent()
                             && !parent.as_os_str().is_empty()
@@ -574,7 +595,7 @@ async fn main() {
                 }
             }
             SbomCommands::Diff { old, new } => {
-                match scanr_core::diff_cyclonedx_sbom_files(&old, &new) {
+                match scanr_sca::diff_cyclonedx_sbom_files(&old, &new) {
                     Ok(diff) => {
                         println!("SBOM Diff");
                         println!("Old: {}", old.display());
@@ -598,14 +619,14 @@ async fn main() {
                         if diff.introduced_dependencies.is_empty() {
                             println!("New Vulnerabilities: 0");
                         } else {
-                            match scanr_core::investigate_vulnerabilities(
+                            match scanr_sca::investigate_vulnerabilities(
                                 &diff.introduced_dependencies,
                             )
                             .await
                             {
                                 Ok(report) => {
                                     let summary =
-                                        scanr_core::summarize_risk(&report.vulnerabilities);
+                                        scanr_sca::summarize_risk(&report.vulnerabilities);
                                     println!(
                                         "New Vulnerabilities: {} {}",
                                         summary.total,
@@ -635,26 +656,29 @@ async fn main() {
         },
         Some(Commands::Baseline { command }) => match command {
             BaselineCommands::Save { path } => {
-                let loaded_policy = scanr_core::load_policy_for_target(&path);
+                let loaded_policy = scanr_sca::load_policy_for_target(&path);
                 let (cache_enabled, cache_ttl_hours) = match &loaded_policy {
                     Ok((policy, _)) => (policy.cache_enabled, policy.cache_ttl_hours),
                     Err(_) => (true, 24),
                 };
-                let scan_options = scanr_core::ScanOptions {
+                let scan_options = scanr_sca::ScanOptions {
                     cache_enabled,
                     cache_ttl_hours,
                     offline: false,
                     force_refresh: false,
                 };
+                let sca_engine = scanr_sca::ScaEngine::new();
 
-                let scan_result =
-                    match scanr_core::scan_path_with_options(&path, &scan_options).await {
-                        Ok(scan_result) => scan_result,
-                        Err(error) => {
-                            eprintln!("Scan failed: {error}");
-                            process::exit(1);
-                        }
-                    };
+                let scan_result = match sca_engine
+                    .scan_detailed_with_options(&path, &scan_options)
+                    .await
+                {
+                    Ok(scan_result) => scan_result,
+                    Err(error) => {
+                        eprintln!("Scan failed: {error}");
+                        process::exit(1);
+                    }
+                };
 
                 if scan_result.lookup_error.is_some() || scan_result.failed_queries > 0 {
                     eprintln!(
@@ -663,9 +687,8 @@ async fn main() {
                     process::exit(1);
                 }
 
-                let baseline = scanr_core::build_baseline_from_scan_result(&scan_result);
-                let baseline_path = match scanr_core::save_baseline_for_target(&path, &scan_result)
-                {
+                let baseline = scanr_sca::build_baseline_from_scan_result(&scan_result);
+                let baseline_path = match scanr_sca::save_baseline_for_target(&path, &scan_result) {
                     Ok(path) => path,
                     Err(error) => {
                         eprintln!("Failed to save baseline: {error}");
@@ -683,10 +706,10 @@ async fn main() {
                 println!("Scanr version: {}", baseline.version);
             }
             BaselineCommands::Status { path } => {
-                let (baseline, baseline_path) = match scanr_core::load_baseline_for_target(&path) {
+                let (baseline, baseline_path) = match scanr_sca::load_baseline_for_target(&path) {
                     Ok(Some(payload)) => payload,
                     Ok(None) => {
-                        let expected = scanr_core::baseline_path_for_target(&path);
+                        let expected = scanr_sca::baseline_path_for_target(&path);
                         eprintln!(
                             "Baseline not found at '{}'. Run `scanr baseline save` first.",
                             normalize_windows_verbatim_path(expected.display().to_string())
@@ -699,27 +722,30 @@ async fn main() {
                     }
                 };
 
-                let loaded_policy = scanr_core::load_policy_for_target(&path);
+                let loaded_policy = scanr_sca::load_policy_for_target(&path);
                 let (cache_enabled, cache_ttl_hours) = match &loaded_policy {
                     Ok((policy, _)) => (policy.cache_enabled, policy.cache_ttl_hours),
                     Err(_) => (true, 24),
                 };
-                let scan_options = scanr_core::ScanOptions {
+                let scan_options = scanr_sca::ScanOptions {
                     cache_enabled,
                     cache_ttl_hours,
                     offline: false,
                     force_refresh: false,
                 };
+                let sca_engine = scanr_sca::ScaEngine::new();
 
-                let scan_result =
-                    match scanr_core::scan_path_with_options(&path, &scan_options).await {
-                        Ok(scan_result) => scan_result,
-                        Err(error) => {
-                            eprintln!("Scan failed: {error}");
-                            process::exit(1);
-                        }
-                    };
-                let delta = scanr_core::compare_scan_result_to_baseline(&scan_result, &baseline);
+                let scan_result = match sca_engine
+                    .scan_detailed_with_options(&path, &scan_options)
+                    .await
+                {
+                    Ok(scan_result) => scan_result,
+                    Err(error) => {
+                        eprintln!("Scan failed: {error}");
+                        process::exit(1);
+                    }
+                };
+                let delta = scanr_sca::compare_scan_result_to_baseline(&scan_result, &baseline);
 
                 println!("Baseline Status");
                 println!(
@@ -729,13 +755,13 @@ async fn main() {
                 println!("Baseline version: {}", baseline.version);
                 println!(
                     "Current Scanr version: {}",
-                    scanr_core::current_scanr_version()
+                    scanr_sca::current_scanr_version()
                 );
-                if baseline.version != scanr_core::current_scanr_version() {
+                if baseline.version != scanr_sca::current_scanr_version() {
                     eprintln!(
                         "Warning: baseline version '{}' differs from current Scanr '{}'.",
                         baseline.version,
-                        scanr_core::current_scanr_version()
+                        scanr_sca::current_scanr_version()
                     );
                 }
                 println!();
@@ -767,7 +793,7 @@ async fn main() {
             }
         },
         Some(Commands::Trace { package, path }) => {
-            let report = match scanr_core::trace_dependency_paths(&path, &package) {
+            let report = match scanr_sca::trace_dependency_paths(&path, &package) {
                 Ok(report) => report,
                 Err(error) => {
                     eprintln!("Trace failed: {error}");
@@ -783,7 +809,7 @@ async fn main() {
                 return;
             }
 
-            let loaded_policy = scanr_core::load_policy_for_target(&path);
+            let loaded_policy = scanr_sca::load_policy_for_target(&path);
             let (cache_enabled, cache_ttl_hours) = match &loaded_policy {
                 Ok((policy, _)) => (policy.cache_enabled, policy.cache_ttl_hours),
                 Err(_) => (true, 24),
@@ -797,7 +823,7 @@ async fn main() {
             } else {
                 std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone())
             };
-            let vulnerability_options = scanr_core::VulnerabilityQueryOptions {
+            let vulnerability_options = scanr_sca::VulnerabilityQueryOptions {
                 cache_base_path: Some(cache_base_path),
                 cache_enabled,
                 cache_ttl_hours,
@@ -809,14 +835,14 @@ async fn main() {
                 .iter()
                 .map(|matched| matched.dependency.clone())
                 .collect::<Vec<_>>();
-            let vulnerability_report = match scanr_core::investigate_vulnerabilities_with_options(
+            let vulnerability_report = match scanr_sca::investigate_vulnerabilities_with_options(
                 &trace_dependencies,
                 &vulnerability_options,
             )
             .await
             {
                 Ok(report) => report,
-                Err(_) => scanr_core::VulnerabilityReport {
+                Err(_) => scanr_sca::VulnerabilityReport {
                     vulnerabilities: Vec::new(),
                     upgrade_recommendations: Vec::new(),
                     queried_dependencies: 0,
@@ -871,7 +897,7 @@ fn normalize_windows_verbatim_path(path: String) -> String {
     path
 }
 
-fn print_vulnerability_table(vulnerabilities: &[scanr_core::Vulnerability]) {
+fn print_vulnerability_table(vulnerabilities: &[scanr_sca::Vulnerability]) {
     let header = format!(
         "{:<4} {:<20} {:<8} {:<8} {:<14} {:<18} {}",
         "#", "CVE", "SEV", "SCORE", "AFFECTED", "PACKAGE", "FIX"
@@ -897,7 +923,7 @@ fn print_vulnerability_table(vulnerabilities: &[scanr_core::Vulnerability]) {
     }
 }
 
-fn print_risk_summary(scan_result: &scanr_core::ScanResult) {
+fn print_risk_summary(scan_result: &scanr_sca::ScanResult) {
     println!();
     println!("Risk Summary");
     println!(
@@ -912,7 +938,7 @@ fn print_risk_summary(scan_result: &scanr_core::ScanResult) {
 }
 
 fn print_license_compliance(
-    evaluation: &scanr_core::LicenseEvaluationResult,
+    evaluation: &scanr_sca::LicenseEvaluationResult,
     ci_mode: bool,
     enforce_in_ci: bool,
     final_ci_exit_code: i32,
@@ -961,7 +987,7 @@ fn print_license_compliance(
     }
 }
 
-fn print_upgrade_recommendations_table(recommendations: &[scanr_core::UpgradeRecommendation]) {
+fn print_upgrade_recommendations_table(recommendations: &[scanr_sca::UpgradeRecommendation]) {
     let header = format!(
         "{:<4} {:<18} {:<8} {:<14} {:<14} {}",
         "#", "PACKAGE", "ECO", "CURRENT", "SUGGESTED", "STATUS"
@@ -990,7 +1016,7 @@ fn print_upgrade_recommendations_table(recommendations: &[scanr_core::UpgradeRec
 
 fn print_dependency_delta_section(
     label: &str,
-    dependencies: &[scanr_core::Dependency],
+    dependencies: &[scanr_sca::Dependency],
     max_rows: usize,
 ) {
     println!("{label}: {}", dependencies.len());
@@ -1005,7 +1031,7 @@ fn print_dependency_delta_section(
     }
 }
 
-fn print_version_change_section(changes: &[scanr_core::SbomVersionChange], max_rows: usize) {
+fn print_version_change_section(changes: &[scanr_sca::SbomVersionChange], max_rows: usize) {
     println!("Version changes: {}", changes.len());
     for change in changes.iter().take(max_rows) {
         let old_versions = change.old_versions.join(", ");
@@ -1020,7 +1046,7 @@ fn print_version_change_section(changes: &[scanr_core::SbomVersionChange], max_r
     }
 }
 
-fn summarize_severity_for_delta(counts: &scanr_core::SeverityCounts) -> String {
+fn summarize_severity_for_delta(counts: &scanr_sca::SeverityCounts) -> String {
     if counts.critical > 0 {
         return "CRITICAL".to_string();
     }
@@ -1106,7 +1132,7 @@ fn print_single_trace_path(path: &[String]) {
 fn print_trace_vulnerability_context(
     package: &str,
     version: &str,
-    vulnerability_report: &scanr_core::VulnerabilityReport,
+    vulnerability_report: &scanr_sca::VulnerabilityReport,
 ) {
     let vulnerability_matches = vulnerability_report
         .vulnerabilities
@@ -1124,13 +1150,13 @@ fn print_trace_vulnerability_context(
             .iter()
             .map(|vulnerability| vulnerability.severity)
             .max_by_key(|severity| match severity {
-                scanr_core::Severity::Critical => 4,
-                scanr_core::Severity::High => 3,
-                scanr_core::Severity::Medium => 2,
-                scanr_core::Severity::Low => 1,
-                scanr_core::Severity::Unknown => 0,
+                scanr_sca::Severity::Critical => 4,
+                scanr_sca::Severity::High => 3,
+                scanr_sca::Severity::Medium => 2,
+                scanr_sca::Severity::Low => 1,
+                scanr_sca::Severity::Unknown => 0,
             })
-            .unwrap_or(scanr_core::Severity::Unknown);
+            .unwrap_or(scanr_sca::Severity::Unknown);
         println!("Severity: {}", highest_severity.to_string().to_uppercase());
 
         let mut cves = vulnerability_matches
@@ -1208,10 +1234,10 @@ fn emit_raw_output(
     Ok(())
 }
 
-fn risk_summary_from_scan_result(scan_result: &scanr_core::ScanResult) -> scanr_core::RiskSummary {
-    scanr_core::RiskSummary {
+fn risk_summary_from_scan_result(scan_result: &scanr_sca::ScanResult) -> scanr_sca::RiskSummary {
+    scanr_sca::RiskSummary {
         total: scan_result.vulnerabilities.len(),
-        counts: scanr_core::SeverityCounts {
+        counts: scanr_sca::SeverityCounts {
             critical: scan_result.severity_summary.critical as usize,
             high: scan_result.severity_summary.high as usize,
             medium: scan_result.severity_summary.medium as usize,

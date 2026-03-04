@@ -1,5 +1,5 @@
 site_name: Scanr
-site_description: Open-source DevSecOps engine with a modular Rust CLI and core library
+site_description: Open-source DevSecOps framework with modular Rust CLI and pluggable engines
 repo_url: https://github.com/Open-Lab-s/Scanr
 repo_name: Open-Lab-s/Scanr
 
@@ -17,7 +17,7 @@ nav:
   - Baseline: baseline.md
   - Cache: cache.md
   - SBOM: sbom.md
-  - Scanr Core: core.md
+  - Scanr SCA: core.md
   - Development: development.md
 
 plugins:

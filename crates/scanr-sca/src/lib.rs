@@ -5,13 +5,19 @@ use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures::stream::{self, StreamExt};
 use reqwest::StatusCode;
+use scanr_engine::{
+    EngineError, EngineResult, EngineType, Finding, ScanEngine, ScanInput, ScanMetadata,
+    ScanResult as EngineScanResult,
+};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value as JsonValue};
+use tokio::sync::Mutex;
 use tokio::time::sleep;
 use toml::Value as TomlValue;
 
@@ -30,10 +36,11 @@ pub use license::{
     LicenseEvaluationResult, LicenseInfo, LicensePolicy, LicenseViolation, evaluate_licenses,
     extract_licenses,
 };
+pub use scanr_engine::Severity;
 pub use trace::{TraceMatch, TraceReport, trace_dependency_paths};
 
 const OSV_QUERY_URL: &str = "https://api.osv.dev/v1/query";
-const OSV_CONCURRENCY_LIMIT: usize = 8;
+const DEFAULT_OSV_CONCURRENCY_LIMIT: usize = 8;
 const OSV_MAX_RETRIES: usize = 4;
 const SUPPORTED_MANIFESTS: [&str; 6] = [
     "package.json",
@@ -44,8 +51,59 @@ const SUPPORTED_MANIFESTS: [&str; 6] = [
     "Cargo.lock",
 ];
 
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ScaEngine;
+
+impl ScaEngine {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub async fn scan_detailed(&self, path: &Path) -> Result<ScanResult, ScanError> {
+        scan_path(path).await
+    }
+
+    pub async fn scan_detailed_with_options(
+        &self,
+        path: &Path,
+        options: &ScanOptions,
+    ) -> Result<ScanResult, ScanError> {
+        scan_path_with_options(path, options).await
+    }
+}
+
+impl ScanEngine for ScaEngine {
+    fn name(&self) -> &'static str {
+        "sca"
+    }
+
+    fn scan(&self, input: ScanInput) -> EngineResult<EngineScanResult> {
+        let path = match input {
+            ScanInput::Path(path) => path,
+            ScanInput::Image(_) => {
+                return Err(EngineError::new(
+                    "unsupported scan input for sca engine: image",
+                ));
+            }
+            ScanInput::Tar(_) => {
+                return Err(EngineError::new(
+                    "unsupported scan input for sca engine: tar",
+                ));
+            }
+        };
+
+        let runtime = tokio::runtime::Runtime::new().map_err(|error| {
+            EngineError::new(format!("failed to create tokio runtime: {error}"))
+        })?;
+        let detailed = runtime
+            .block_on(scan_path(&path))
+            .map_err(|error| EngineError::new(error.to_string()))?;
+        Ok(convert_to_engine_scan_result(&detailed))
+    }
+}
+
 pub fn placeholder_status() -> &'static str {
-    "scanr-core placeholder"
+    "scanr-sca placeholder"
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -72,28 +130,6 @@ pub struct Dependency {
     pub version: String,
     pub ecosystem: Ecosystem,
     pub direct: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Severity {
-    Critical,
-    High,
-    Medium,
-    Low,
-    Unknown,
-}
-
-impl Display for Severity {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Critical => write!(f, "critical"),
-            Self::High => write!(f, "high"),
-            Self::Medium => write!(f, "medium"),
-            Self::Low => write!(f, "low"),
-            Self::Unknown => write!(f, "unknown"),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -727,6 +763,37 @@ pub async fn scan_path_with_options(
     })
 }
 
+fn convert_to_engine_scan_result(scan_result: &ScanResult) -> EngineScanResult {
+    let findings = findings_from_scan_result(scan_result);
+
+    EngineScanResult {
+        findings,
+        metadata: ScanMetadata {
+            engine: EngineType::SCA,
+            engine_name: "sca".to_string(),
+            target: scan_result.target.clone(),
+            total_dependencies: scan_result.total_dependencies as usize,
+            total_vulnerabilities: scan_result.vulnerabilities.len(),
+        },
+    }
+}
+
+pub fn findings_from_scan_result(scan_result: &ScanResult) -> Vec<Finding> {
+    scan_result
+        .vulnerabilities
+        .iter()
+        .map(|vulnerability| Finding {
+            id: vulnerability.cve_id.clone(),
+            engine: EngineType::SCA,
+            severity: vulnerability.severity,
+            title: short_message_from_description(&vulnerability.description),
+            description: vulnerability.description.clone(),
+            location: Some(scan_result.path.clone()),
+            remediation: vulnerability.remediation.clone(),
+        })
+        .collect()
+}
+
 pub fn scan_result_to_sarif(scan_result: &ScanResult) -> SarifReport {
     let mut rules_by_id = BTreeMap::<String, String>::new();
     for vulnerability in &scan_result.vulnerabilities {
@@ -1058,35 +1125,38 @@ pub async fn investigate_vulnerabilities_with_options(
         )
     });
 
-    let targets = prepare_vulnerability_targets(dependencies);
-    let queried_dependencies = targets.len();
+    let batches = prepare_vulnerability_target_batches(dependencies);
+    let queried_dependencies = batches
+        .iter()
+        .map(|batch| batch.targets.len())
+        .sum::<usize>();
     let mut failed_queries = 0usize;
     let mut offline_missing = 0usize;
-    let mut vulnerabilities = Vec::new();
-    let mut recommendations = Vec::new();
-    let mut cache_events = Vec::new();
+    let mut vulnerabilities = Vec::with_capacity(queried_dependencies.saturating_mul(2));
+    let mut recommendations = Vec::with_capacity(queried_dependencies);
+    let mut cache_events = Vec::with_capacity(queried_dependencies);
+    let concurrency_limit = osv_concurrency_limit();
 
-    let mut tasks = stream::iter(targets.into_iter().map(|target| {
+    let mut tasks = stream::iter(batches.into_iter().map(|batch| {
         let client = client.clone();
         let cache_manager = cache_manager.clone();
-        async move { fetch_vulnerabilities_for_dependency(&client, target, cache_manager).await }
+        async move { investigate_target_batch(&client, batch, cache_manager).await }
     }))
-    .buffer_unordered(OSV_CONCURRENCY_LIMIT);
+    .buffer_unordered(concurrency_limit);
 
     while let Some(result) = tasks.next().await {
-        match result {
-            Ok(package_result) => {
-                failed_queries += usize::from(package_result.failed_query);
-                offline_missing += usize::from(package_result.offline_missing);
-                if let Some(event) = package_result.cache_event {
-                    cache_events.push(event);
-                }
-                vulnerabilities.extend(package_result.vulnerabilities);
-                if let Some(recommendation) = package_result.recommendation {
-                    recommendations.push(recommendation);
-                }
+        let batch_outcome = result;
+        failed_queries += batch_outcome.failed_queries;
+        for package_result in batch_outcome.results {
+            failed_queries += usize::from(package_result.failed_query);
+            offline_missing += usize::from(package_result.offline_missing);
+            if let Some(event) = package_result.cache_event {
+                cache_events.push(event);
             }
-            Err(_) => failed_queries += 1,
+            vulnerabilities.extend(package_result.vulnerabilities);
+            if let Some(recommendation) = package_result.recommendation {
+                recommendations.push(recommendation);
+            }
         }
     }
 
@@ -1213,6 +1283,11 @@ struct VulnerabilityTarget {
 }
 
 #[derive(Debug)]
+struct VulnerabilityTargetBatch {
+    targets: Vec<VulnerabilityTarget>,
+}
+
+#[derive(Debug)]
 struct PackageInvestigationResult {
     vulnerabilities: Vec<Vulnerability>,
     recommendation: Option<UpgradeRecommendation>,
@@ -1221,9 +1296,17 @@ struct PackageInvestigationResult {
     cache_event: Option<String>,
 }
 
-fn prepare_vulnerability_targets(dependencies: &[Dependency]) -> Vec<VulnerabilityTarget> {
-    let mut targets = Vec::new();
-    let mut seen = BTreeSet::new();
+#[derive(Debug)]
+struct BatchInvestigationOutcome {
+    results: Vec<PackageInvestigationResult>,
+    failed_queries: usize,
+}
+
+fn prepare_vulnerability_target_batches(
+    dependencies: &[Dependency],
+) -> Vec<VulnerabilityTargetBatch> {
+    let mut batches = BTreeMap::<(Ecosystem, String), Vec<VulnerabilityTarget>>::new();
+    let mut seen = HashSet::new();
 
     for dependency in dependencies {
         let Some(version) = parse_semverish(&dependency.version) else {
@@ -1236,20 +1319,36 @@ fn prepare_vulnerability_targets(dependencies: &[Dependency]) -> Vec<Vulnerabili
             dependency.version.clone(),
         );
         if seen.insert(key) {
-            targets.push(VulnerabilityTarget {
+            let target = VulnerabilityTarget {
                 dependency: dependency.clone(),
                 version,
-            });
+            };
+            batches
+                .entry((target.dependency.ecosystem, target.dependency.name.clone()))
+                .or_default()
+                .push(target);
         }
     }
 
-    targets
+    batches
+        .into_values()
+        .map(|targets| VulnerabilityTargetBatch { targets })
+        .collect()
+}
+
+fn osv_concurrency_limit() -> usize {
+    std::env::var("SCANR_OSV_CONCURRENCY")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .map(|value| value.clamp(1, 64))
+        .unwrap_or(DEFAULT_OSV_CONCURRENCY_LIMIT)
 }
 
 async fn fetch_vulnerabilities_for_dependency(
     client: &reqwest::Client,
     target: VulnerabilityTarget,
     cache_manager: Option<CacheManager>,
+    shared_query_payload: Option<Arc<Mutex<Option<JsonValue>>>>,
 ) -> Result<PackageInvestigationResult, ScanError> {
     let offline_mode = cache_manager
         .as_ref()
@@ -1264,8 +1363,18 @@ async fn fetch_vulnerabilities_for_dependency(
 
     let (payload_json, cache_event, offline_missing) = if let Some(cache_manager) = cache_manager {
         match cache_manager
-            .get_or_fetch(&target.dependency, || {
-                query_osv_json_with_retry(client, &request)
+            .get_or_fetch(&target.dependency, || async {
+                if let Some(shared_payload) = &shared_query_payload {
+                    let mut guard = shared_payload.lock().await;
+                    if let Some(payload) = guard.as_ref() {
+                        return Ok(payload.clone());
+                    }
+                    let payload = query_osv_json_with_retry(client, &request).await?;
+                    *guard = Some(payload.clone());
+                    Ok(payload)
+                } else {
+                    query_osv_json_with_retry(client, &request).await
+                }
             })
             .await?
         {
@@ -1297,11 +1406,22 @@ async fn fetch_vulnerabilities_for_dependency(
             }
         }
     } else {
-        (
-            query_osv_json_with_retry(client, &request).await?,
-            None,
-            false,
-        )
+        if let Some(shared_payload) = &shared_query_payload {
+            let mut guard = shared_payload.lock().await;
+            if let Some(payload) = guard.as_ref() {
+                (payload.clone(), None, false)
+            } else {
+                let payload = query_osv_json_with_retry(client, &request).await?;
+                *guard = Some(payload.clone());
+                (payload, None, false)
+            }
+        } else {
+            (
+                query_osv_json_with_retry(client, &request).await?,
+                None,
+                false,
+            )
+        }
     };
 
     let payload = serde_json::from_value::<OsvQueryResponse>(payload_json).map_err(|source| {
@@ -1363,6 +1483,43 @@ async fn fetch_vulnerabilities_for_dependency(
         offline_missing,
         cache_event,
     })
+}
+
+async fn investigate_target_batch(
+    client: &reqwest::Client,
+    batch: VulnerabilityTargetBatch,
+    cache_manager: Option<CacheManager>,
+) -> BatchInvestigationOutcome {
+    let batch_size = batch.targets.len();
+    if batch_size == 0 {
+        return BatchInvestigationOutcome {
+            results: Vec::new(),
+            failed_queries: 0,
+        };
+    }
+
+    let shared_query_payload = Arc::new(Mutex::new(None));
+    let mut results = Vec::with_capacity(batch_size);
+    let mut failed_queries = 0usize;
+
+    for target in batch.targets {
+        match fetch_vulnerabilities_for_dependency(
+            client,
+            target,
+            cache_manager.clone(),
+            Some(shared_query_payload.clone()),
+        )
+        .await
+        {
+            Ok(result) => results.push(result),
+            Err(_) => failed_queries += 1,
+        }
+    }
+
+    BatchInvestigationOutcome {
+        results,
+        failed_queries,
+    }
 }
 
 async fn query_osv_json_with_retry(
@@ -1709,20 +1866,20 @@ fn extract_severity(vulnerability: &OsvVulnerability) -> Severity {
         .as_ref()
         .and_then(|database_specific| database_specific.severity.as_deref())
     {
-        let severity = Severity::from_label(label);
+        let severity = severity_from_label(label);
         if severity != Severity::Unknown {
             return severity;
         }
     }
 
     for entry in &vulnerability.severity {
-        let by_label = Severity::from_label(&entry.score);
+        let by_label = severity_from_label(&entry.score);
         if by_label != Severity::Unknown {
             return by_label;
         }
 
         if let Ok(score) = entry.score.parse::<f32>() {
-            return Severity::from_cvss_score(score);
+            return severity_from_cvss_score(score);
         }
     }
 
@@ -1999,34 +2156,32 @@ fn deterministic_uuid(target: &str, path: &str, dependency_count: usize) -> Stri
     )
 }
 
-impl Severity {
-    fn from_label(label: &str) -> Severity {
-        let normalized = label.to_ascii_lowercase();
-        if normalized.contains("critical") {
-            Severity::Critical
-        } else if normalized.contains("high") {
-            Severity::High
-        } else if normalized.contains("medium") || normalized.contains("moderate") {
-            Severity::Medium
-        } else if normalized.contains("low") {
-            Severity::Low
-        } else {
-            Severity::Unknown
-        }
+fn severity_from_label(label: &str) -> Severity {
+    let normalized = label.to_ascii_lowercase();
+    if normalized.contains("critical") {
+        Severity::Critical
+    } else if normalized.contains("high") {
+        Severity::High
+    } else if normalized.contains("medium") || normalized.contains("moderate") {
+        Severity::Medium
+    } else if normalized.contains("low") {
+        Severity::Low
+    } else {
+        Severity::Unknown
     }
+}
 
-    fn from_cvss_score(score: f32) -> Severity {
-        if score >= 9.0 {
-            Severity::Critical
-        } else if score >= 7.0 {
-            Severity::High
-        } else if score >= 4.0 {
-            Severity::Medium
-        } else if score > 0.0 {
-            Severity::Low
-        } else {
-            Severity::Unknown
-        }
+fn severity_from_cvss_score(score: f32) -> Severity {
+    if score >= 9.0 {
+        Severity::Critical
+    } else if score >= 7.0 {
+        Severity::High
+    } else if score >= 4.0 {
+        Severity::Medium
+    } else if score > 0.0 {
+        Severity::Low
+    } else {
+        Severity::Unknown
     }
 }
 

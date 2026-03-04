@@ -2,7 +2,7 @@
 
 `scanr-cli` exposes one scan engine and multiple presentation layers.
 
-All formats originate from the same core `ScanResult` model in `scanr-core`.
+All formats originate from the same core `ScanResult` model in `scanr-sca`.
 
 ## Human-Readable Output (default)
 
