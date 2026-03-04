@@ -13,3 +13,5 @@ categories = ["development-tools"]
 [dependencies]
 scanr-engine = { version = "0.1.1", path = "../scanr-engine" }
 scanr-sca = { version = "0.1.1", path = "../scanr-sca" }
+tar = "0.4"
+tempfile = "3.13"

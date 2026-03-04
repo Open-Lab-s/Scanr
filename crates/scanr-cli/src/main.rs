@@ -566,7 +566,14 @@ async fn main() {
         }
         Some(Commands::Image { target }) => {
             let container_engine = scanr_container::ContainerEngine::new();
-            let result = match container_engine.scan(scanr_engine::ScanInput::Image(target)) {
+            let target_path = PathBuf::from(&target);
+            let input = if is_tar_target(&target, &target_path) {
+                scanr_engine::ScanInput::Tar(target_path)
+            } else {
+                scanr_engine::ScanInput::Image(target)
+            };
+
+            let result = match container_engine.scan(input) {
                 Ok(result) => result,
                 Err(error) => {
                     eprintln!("Image scan failed: {error}");
@@ -1268,4 +1275,13 @@ fn risk_summary_from_scan_result(scan_result: &scanr_sca::ScanResult) -> scanr_s
         },
         risk_level: scan_result.risk_level,
     }
+}
+
+fn is_tar_target(raw_target: &str, target_path: &std::path::Path) -> bool {
+    if target_path.is_file() {
+        return true;
+    }
+
+    let lower = raw_target.to_ascii_lowercase();
+    lower.ends_with(".tar") || lower.ends_with(".tar.gz") || lower.ends_with(".tgz")
 }
