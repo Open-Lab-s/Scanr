@@ -584,7 +584,7 @@ async fn main() {
             println!("Scanr Container Scan");
             println!("Engine: {}", result.metadata.engine_name);
             println!("Target: {}", result.metadata.target);
-            println!("Status: placeholder implementation (C1 skeleton)");
+            println!("Status: dependency composition scan");
             println!("Dependencies discovered: {}", result.metadata.total_dependencies);
             println!("Findings: {}", result.findings.len());
         }
