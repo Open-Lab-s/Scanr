@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::process;
 
 use clap::{Parser, Subcommand};
+use scanr_engine::ScanEngine;
 use serde::Serialize;
 
 mod tui;
@@ -52,6 +53,11 @@ enum Commands {
         /// Recursively scan subdirectories for supported manifest files.
         #[arg(short, long)]
         recursive: bool,
+    },
+    /// Scan a container image target (engine skeleton).
+    Image {
+        /// Image target (for example: ghcr.io/org/app:latest).
+        target: String,
     },
     /// Software bill of materials operations.
     Sbom {
@@ -557,6 +563,22 @@ async fn main() {
             if ci && final_ci_exit_code != 0 {
                 process::exit(final_ci_exit_code);
             }
+        }
+        Some(Commands::Image { target }) => {
+            let container_engine = scanr_container::ContainerEngine::new();
+            let result = match container_engine.scan(scanr_engine::ScanInput::Image(target)) {
+                Ok(result) => result,
+                Err(error) => {
+                    eprintln!("Image scan failed: {error}");
+                    process::exit(1);
+                }
+            };
+
+            println!("Scanr Container Scan");
+            println!("Engine: {}", result.metadata.engine_name);
+            println!("Target: {}", result.metadata.target);
+            println!("Status: placeholder implementation (C1 skeleton)");
+            println!("Findings: {}", result.findings.len());
         }
         Some(Commands::Sbom { command }) => match command {
             SbomCommands::Generate { path, output } => {

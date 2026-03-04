@@ -1,0 +1,15 @@
+[package]
+name = "scanr-container"
+version = "0.1.1"
+edition = "2024"
+description = "Container security engine for Scanr"
+license = "Apache-2.0"
+repository = "https://github.com/Open-Lab-s/Scanr"
+homepage = "https://scanr.dev"
+readme = "../../README.md"
+keywords = ["security", "devsecops", "container", "vulnerability", "scanr"]
+categories = ["development-tools"]
+
+[dependencies]
+scanr-engine = { version = "0.1.1", path = "../scanr-engine" }
+scanr-sca = { version = "0.1.1", path = "../scanr-sca" }
